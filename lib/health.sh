@@ -106,6 +106,9 @@ print_status_table() {
   table_row "AGENT" "STATUS" "GW PORT" "BR PORT" "TELEGRAM" "UPTIME"
   echo "  $(printf -- '-%.0s' {1..76})"
 
+  local total=0
+  local running=0
+
   for name in $(registry_list_agents); do
     local agent_info
     agent_info=$(registry_get_agent "$name")
@@ -125,6 +128,10 @@ print_status_table() {
 
     local uptime
     uptime=$(get_uptime "$name")
+
+    # Track counts
+    total=$((total + 1))
+    [[ "$health" == "healthy" || "$health" == "healthy+telegram" ]] && running=$((running + 1))
 
     # Colorize status
     local status_display
@@ -155,15 +162,7 @@ print_status_table() {
 
   echo ""
 
-  # Fleet summary
-  local total
-  total=$(registry_list_agents | wc -l | tr -d ' ')
-  local running=0
-  for name in $(registry_list_agents); do
-    local h
-    h=$(check_agent_health "$name")
-    [[ "$h" == "healthy" || "$h" == "healthy+telegram" ]] && running=$((running + 1))
-  done
+  # Fleet summary (using counts from display loop above)
   echo -e "  Total: ${BOLD}${total}${NC}  Running: ${GREEN}${running}${NC}  Stopped: ${RED}$((total - running))${NC}"
   echo ""
 }
@@ -207,7 +206,7 @@ watchdog_check() {
     if [[ "$health" == "unhealthy" ]] || [[ "$health" == "stopped" ]]; then
       # Count recent unhealthy checks
       local recent_failures
-      recent_failures=$(tail -20 "$log_file" 2>/dev/null | grep "$name" | grep -c -E "unhealthy|stopped" || echo 0)
+      recent_failures=$(grep "$name" "$log_file" 2>/dev/null | tail -"$max_unhealthy" | grep -c -E "unhealthy|stopped" || echo 0)
 
       if [[ $recent_failures -ge $max_unhealthy ]]; then
         log_warn "Agent '$name' has been unhealthy for $recent_failures checks. Attempting restart..."

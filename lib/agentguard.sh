@@ -82,7 +82,7 @@ register_agent() {
   agent_key=$(curl -sf -X POST "${AGENTGUARD_API}/api/v1/agents" \
     -H "X-API-Key: ${AGENTGUARD_API_KEY}" \
     -H "Content-Type: application/json" \
-    -d "{\"name\": \"${name}\", \"tenant\": \"openclaw-fleet\"}" \
+    -d "$(jq -n --arg n "$name" '{name: $n, tenant: "openclaw-fleet"}')" \
     | jq -r '.agentKey // empty' 2>/dev/null)
 
   if [[ -n "$agent_key" ]]; then
@@ -141,7 +141,7 @@ kill_agent() {
   curl -sf -X POST "${AGENTGUARD_API}/api/v1/agents/${agent_key}/kill" \
     -H "X-API-Key: ${AGENTGUARD_API_KEY}" \
     -H "Content-Type: application/json" \
-    -d "{\"reason\": \"${reason}\"}" &>/dev/null
+    -d "$(jq -n --arg r "$reason" '{reason: $r}')" &>/dev/null
 
   # Also stop the Docker container
   stop_agent "$name" 10

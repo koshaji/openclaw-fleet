@@ -122,6 +122,9 @@ services:
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: \${OPENCLAW_GATEWAY_TOKEN}
+      AGENTGUARD_API_KEY: \${AGENTGUARD_API_KEY:-}
+      AGENTGUARD_AGENT_KEY: \${AGENTGUARD_AGENT_KEY:-}
+      AGENTGUARD_API_URL: \${AGENTGUARD_API_URL:-}
     volumes:
       - \${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - \${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
@@ -214,6 +217,18 @@ OPENCLAW_GATEWAY_PORT=${gateway_port}
 OPENCLAW_BRIDGE_PORT=${bridge_port}
 OPENCLAW_GATEWAY_TOKEN=${gateway_token}
 ENV
+
+  # Add AgentGuard env if configured
+  if [[ -n "${AGENTGUARD_API_KEY:-}" ]]; then
+    local agent_key
+    agent_key=$(jq -r ".agents[\"$name\"].agentguardKey // empty" \
+      "${FLEET_DIR}/agents/registry.json" 2>/dev/null)
+    cat <<ENV2
+AGENTGUARD_API_KEY=${AGENTGUARD_API_KEY}
+AGENTGUARD_AGENT_KEY=${agent_key}
+AGENTGUARD_API_URL=${AGENTGUARD_API:-https://api.agentguard.tech}
+ENV2
+  fi
 }
 
 # Create full agent directory structure and config files

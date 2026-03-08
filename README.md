@@ -1,6 +1,6 @@
 # OpenClaw Fleet Manager
 
-Provision, manage, and monitor multiple isolated OpenClaw AI agent Docker containers on a single machine.
+[OpenClaw](https://openclaw.dev) is a self-hosted AI agent platform with multi-channel support (Telegram, web, etc.). The **Fleet Manager** lets you provision, manage, and monitor multiple isolated OpenClaw agents as Docker containers on a single machine.
 
 Each agent runs in its own Docker container with:
 - Full network isolation (own bridge network, localhost-only ports)
@@ -11,16 +11,19 @@ Each agent runs in its own Docker container with:
 
 ## Prerequisites
 
-- **Docker Desktop** (macOS) or Docker Engine (Linux)
+- **Docker Desktop** (macOS: `brew install --cask docker`) or Docker Engine (Linux)
 - **jq** — `brew install jq` (macOS) or `apt-get install jq` (Linux)
-- **OpenClaw-compatible API key** (zai or other provider)
+- **curl** and **openssl** (pre-installed on most systems)
+- **AI provider API key** (Anthropic, OpenAI, zai, Google, etc.)
 - **Telegram bot tokens** — one per agent, from [@BotFather](https://t.me/BotFather)
+- *Optional:* [1Password CLI](https://1password.com/downloads/command-line/) for secret management
+- *Optional:* [AgentGuard](https://agentguard.tech) for runtime policy enforcement
 
 ## Quick Start
 
 ```bash
 # 1. Clone this repo
-git clone <repo-url> openclaw-fleet && cd openclaw-fleet
+git clone https://github.com/koshaji/openclaw-fleet && cd openclaw-fleet
 
 # 2. Create 3 agents (will prompt for API provider and Telegram tokens on first run)
 ./fleet.sh create 3
@@ -85,16 +88,23 @@ API keys are managed separately via the provider system:
 
 ```
 openclaw-fleet/
-├── fleet.sh              # CLI entrypoint
+├── fleet.sh              # CLI entrypoint (dispatcher + commands)
 ├── lib/                  # Bash modules
 │   ├── common.sh         # Logging, locking, platform detection
-│   ├── ports.sh          # Port allocation + registry
-│   ├── config.sh         # Config generation (jq-based)
-│   ├── docker.sh         # Container lifecycle
-│   └── health.sh         # Health checks + watchdog
-├── .env.fleet            # Fleet-wide secrets (gitignored)
+│   ├── ports.sh          # Port allocation + registry CRUD
+│   ├── config.sh         # Config generation (jq-based, no sed)
+│   ├── docker.sh         # Container lifecycle + resource checks
+│   ├── health.sh         # Health checks, status table, watchdog
+│   ├── models.sh         # Provider subscriptions + model allocation
+│   ├── naming.sh         # Auto-naming from pool / role-based
+│   ├── secrets.sh        # 1Password integration (optional)
+│   ├── agentguard.sh     # AgentGuard policy enforcement (optional)
+│   └── maintain.sh       # Daily maintenance (health, backup, cleanup)
+├── .env.fleet            # Fleet-wide config (gitignored)
+├── agentguard.yaml       # Security policy (created on enable)
 └── agents/               # Generated at runtime (gitignored)
     ├── registry.json     # Port registry + agent metadata
+    ├── providers.json    # API key subscriptions
     └── <agent-name>/     # Per-agent directory
         ├── docker-compose.yml
         ├── .env

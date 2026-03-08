@@ -36,6 +36,7 @@ source "${FLEET_DIR}/lib/models.sh"
 source "${FLEET_DIR}/lib/naming.sh"
 source "${FLEET_DIR}/lib/secrets.sh"
 source "${FLEET_DIR}/lib/agentguard.sh"
+source "${FLEET_DIR}/lib/maintain.sh"
 
 # --- Fleet env initialization ---
 
@@ -207,6 +208,8 @@ cmd_create() {
     if [[ ${#telegram_tokens[@]} -ge $i ]]; then
       tg_token="${telegram_tokens[$((i-1))]}"
     else
+      echo ""
+      log_info "Need a Telegram bot token? Create one by messaging @BotFather: https://t.me/BotFather"
       echo -en "${CYAN}Enter Telegram bot token for '$name': ${NC}"
       read -r tg_token
     fi
@@ -310,8 +313,11 @@ cmd_create() {
   echo ""
 
   if [[ $created -gt 0 ]]; then
-    log_info "To pair Telegram accounts, message each bot then run:"
-    log_info "  ./fleet.sh pair <agent_name> <pairing_code>"
+    log_info "Next: Pair your Telegram account with each bot:"
+    log_info "  1. Open Telegram, find the bot by its @username"
+    log_info "  2. Send it any message (e.g., 'hello')"
+    log_info "  3. The bot replies with a pairing code"
+    log_info "  4. Run: ./fleet.sh pair <agent_name> <code>"
     echo ""
     print_status_table
   fi
@@ -330,6 +336,7 @@ cmd_status() {
   done
 
   detect_platform
+  acquire_lock
   init_registry
 
   # Always reconcile first
@@ -793,6 +800,7 @@ cmd_backup() {
       -C "$FLEET_DIR" \
       .env.fleet \
       agents/registry.json \
+      agents/providers.json \
       2>/dev/null || true
     log_ok "Fleet config backed up to $fleet_backup"
   else
@@ -911,11 +919,35 @@ cmd_watchdog() {
       ;;
     run)
       detect_platform
+      acquire_lock
       init_registry
       watchdog_check 3
       ;;
     *)
       log_fatal "Usage: fleet.sh watchdog [install|uninstall|run]"
+      ;;
+  esac
+}
+
+cmd_maintain() {
+  local action="${1:-run}"
+
+  case "$action" in
+    install)
+      maintain_install_cron
+      ;;
+    uninstall)
+      maintain_uninstall_cron
+      ;;
+    run)
+      source_fleet_env
+      detect_platform
+      acquire_lock
+      init_registry
+      maintain_run
+      ;;
+    *)
+      log_fatal "Usage: fleet.sh maintain [install|uninstall|run]"
       ;;
   esac
 }
@@ -974,11 +1006,10 @@ cmd_models() {
     assign)
       local agent="${1:-}"
       local primary="${2:-}"
-      shift 2 || true
-
       if [[ -z "$agent" ]] || [[ -z "$primary" ]]; then
         interactive_allocate_model "$agent"
       else
+        shift 2
         allocate_model "$agent" "$primary" "$@"
       fi
 
@@ -1162,6 +1193,7 @@ Tools:
   reconcile           Sync registry with Docker state
   backup / restore    Backup and restore agent configs
   watchdog            Health watchdog (install/uninstall/run)
+  maintain            Daily maintenance (install/uninstall/run)
 
 HELP
 }
@@ -1191,6 +1223,7 @@ main() {
     backup)       cmd_backup "$@" ;;
     restore)      init_fleet_env; cmd_restore "$@" ;;
     watchdog)     cmd_watchdog "$@" ;;
+    maintain)     cmd_maintain "$@" ;;
     pair)         cmd_pair "$@" ;;
     providers)    source_fleet_env; cmd_providers "$@" ;;
     models)       source_fleet_env; cmd_models "$@" ;;
