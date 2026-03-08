@@ -156,7 +156,7 @@ maintain_backup() {
   mkdir -p "$backup_dir"
   chmod 700 "$backup_dir"
 
-  # Fleet-level backup (encrypted with openssl if available)
+  # Fleet-level backup
   local fleet_backup="${backup_dir}/fleet_${timestamp}.tar.gz"
   tar -czf "$fleet_backup" \
     -C "$FLEET_DIR" \

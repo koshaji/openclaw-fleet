@@ -763,6 +763,7 @@ cmd_shell() {
   if [[ -z "$name" ]]; then
     log_fatal "Usage: fleet.sh shell <name>"
   fi
+  validate_name "$name"
 
   log_info "Opening shell in agent '$name'..."
   docker exec -it "openclaw_${name}" /bin/sh
@@ -1125,12 +1126,18 @@ cmd_agentguard() {
       if [[ -z "$api_key" ]]; then
         log_fatal "API key required. Get one at https://agentguard.tech"
       fi
+      # Validate API key format (alphanumeric, underscores, hyphens, dots)
+      if [[ ! "$api_key" =~ ^[a-zA-Z0-9_.\-]+$ ]]; then
+        log_fatal "Invalid API key format. Keys should only contain alphanumeric characters, underscores, hyphens, and dots."
+      fi
       export AGENTGUARD_API_KEY="$api_key"
 
-      # Save to .env.fleet
-      if grep -q "AGENTGUARD_API_KEY" "${FLEET_DIR}/.env.fleet" 2>/dev/null; then
-        sed -i.bak "s|^AGENTGUARD_API_KEY=.*|AGENTGUARD_API_KEY='${api_key}'|" "${FLEET_DIR}/.env.fleet"
-        rm -f "${FLEET_DIR}/.env.fleet.bak"
+      # Save to .env.fleet (rewrite line to avoid sed delimiter issues)
+      if grep -q "^AGENTGUARD_API_KEY=" "${FLEET_DIR}/.env.fleet" 2>/dev/null; then
+        grep -v "^AGENTGUARD_API_KEY=" "${FLEET_DIR}/.env.fleet" > "${FLEET_DIR}/.env.fleet.tmp"
+        echo "AGENTGUARD_API_KEY='${api_key}'" >> "${FLEET_DIR}/.env.fleet.tmp"
+        mv "${FLEET_DIR}/.env.fleet.tmp" "${FLEET_DIR}/.env.fleet"
+        chmod 600 "${FLEET_DIR}/.env.fleet"
       else
         echo "AGENTGUARD_API_KEY='${api_key}'" >> "${FLEET_DIR}/.env.fleet"
       fi

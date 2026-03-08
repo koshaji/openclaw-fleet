@@ -370,12 +370,11 @@ generate_agent_auth_profiles() {
     local sub_type
     sub_type=$(jq -r ".subscriptions[\"$sub\"].type" "$PROVIDERS_FILE")
 
-    profiles=$(echo "$profiles" | jq \
+    profiles=$(_JQ_SECRET="$api_key" jq \
       --arg name "${sub}:default" \
       --arg type "api_key" \
       --arg provider "$sub" \
-      --arg key "$api_key" \
-      '.[$name] = {type: $type, provider: $provider, key: $key}')
+      '.[$name] = {type: $type, provider: $provider, key: $ENV._JQ_SECRET}' <<< "$profiles")
   done
 
   jq -n --argjson profiles "$profiles" '{version: 1, profiles: $profiles}'

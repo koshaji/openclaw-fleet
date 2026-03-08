@@ -83,18 +83,16 @@ generate_openclaw_config() {
 generate_auth_profiles() {
   local api_key="$1"
 
-  jq -n \
-    --arg key "$api_key" \
-    '{
-      version: 1,
-      profiles: {
-        "zai:default": {
-          type: "api_key",
-          provider: "zai",
-          key: $key
-        }
+  printf '%s' "$api_key" | jq -Rs '{
+    version: 1,
+    profiles: {
+      "zai:default": {
+        type: "api_key",
+        provider: "zai",
+        key: (. | rtrimstr("\n"))
       }
-    }'
+    }
+  }'
 }
 
 # Generate docker-compose.yml for an agent
@@ -171,17 +169,19 @@ services:
     image: ${image}
     network_mode: "service:openclaw-gateway"
     cap_drop:
-      - NET_RAW
-      - NET_ADMIN
+      - ALL
     security_opt:
       - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=50M
     environment:
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: \${OPENCLAW_GATEWAY_TOKEN}
       BROWSER: echo
     volumes:
-      - \${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
+      - \${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw:ro
       - \${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
     logging:
       driver: json-file
