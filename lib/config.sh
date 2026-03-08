@@ -124,8 +124,12 @@ services:
       OPENCLAW_GATEWAY_TOKEN: \${OPENCLAW_GATEWAY_TOKEN}
       AGENTGUARD_AGENT_KEY: \${AGENTGUARD_AGENT_KEY:-}
       AGENTGUARD_API_URL: \${AGENTGUARD_API_URL:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+      - /home/node/.cache:size=50M
     volumes:
-      - \${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
+      - \${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw:ro
       - \${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
     ports:
       - "127.0.0.1:\${OPENCLAW_GATEWAY_PORT:-${gateway_port}}:${gateway_port}"
@@ -134,16 +138,12 @@ services:
     restart: unless-stopped
     cpus: '${cpus}'
     mem_limit: ${memory}
+    pids_limit: 256
     logging:
       driver: json-file
       options:
         max-size: "50m"
         max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: '${cpus}'
-          memory: ${memory}
     command:
       [
         "node",
@@ -220,7 +220,7 @@ ENV
   # Add AgentGuard env if configured
   if [[ -n "${AGENTGUARD_API_KEY:-}" ]]; then
     local agent_key
-    agent_key=$(jq -r ".agents[\"$name\"].agentguardKey // empty" \
+    agent_key=$(jq -r --arg name "$name" '.agents[$name].agentguardKey // empty' \
       "${FLEET_DIR}/agents/registry.json" 2>/dev/null)
     cat <<ENV2
 AGENTGUARD_AGENT_KEY=${agent_key}

@@ -30,7 +30,7 @@ registry_list_agents() {
 # Get agent info from registry
 registry_get_agent() {
   local name="$1"
-  jq -r ".agents[\"$name\"]" "$REGISTRY_FILE" 2>/dev/null
+  jq -r --arg name "$name" '.agents[$name]' "$REGISTRY_FILE" 2>/dev/null
 }
 
 # Allocate the next available port pair
@@ -151,7 +151,7 @@ reconcile_registry() {
     docker_state=$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || echo "missing")
 
     local registry_state
-    registry_state=$(jq -r ".agents[\"$name\"].state" "$REGISTRY_FILE")
+    registry_state=$(jq -r --arg name "$name" '.agents[$name].state' "$REGISTRY_FILE")
 
     if [[ "$docker_state" == "missing" ]] && [[ "$registry_state" == "running" ]]; then
       log_warn "Agent '$name' in registry as 'running' but container not found. Marking as stopped."

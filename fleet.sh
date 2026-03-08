@@ -56,6 +56,12 @@ init_fleet_env() {
   read -r manager_name
   manager_name="${manager_name:-mini4}"
 
+  # Reject shell metacharacters in all env values
+  local bad_chars='[$`"'"'"'\\;|&!(){}]'
+  if [[ "$manager_name" =~ $bad_chars ]]; then
+    log_fatal "Manager name contains invalid characters"
+  fi
+
   # Defaults
   local base_port="${FLEET_BASE_PORT:-19000}"
   local image_tag="${OPENCLAW_IMAGE_TAG:-latest}"
@@ -77,6 +83,16 @@ init_fleet_env() {
   echo -en "${CYAN}Memory limit per agent [${memory}]: ${NC}"
   read -r input_mem
   memory="${input_mem:-$memory}"
+
+  # Validate all values
+  if [[ ! "$base_port" =~ ^[0-9]+$ ]]; then
+    log_fatal "Base port must be a number"
+  fi
+  for val in "$image_tag" "$cpus" "$memory"; do
+    if [[ "$val" =~ $bad_chars ]]; then
+      log_fatal "Config value contains invalid characters: $val"
+    fi
+  done
 
   cat > "$fleet_env" <<EOF
 FLEET_MANAGER_NAME='${manager_name}'
@@ -801,6 +817,7 @@ cmd_backup() {
   timestamp=$(date +%Y%m%d_%H%M%S)
   local backup_dir="${FLEET_DIR}/backups"
   mkdir -p "$backup_dir"
+  chmod 700 "$backup_dir"
 
   detect_platform
   init_registry
@@ -819,6 +836,7 @@ cmd_backup() {
       agents/registry.json \
       agents/providers.json \
       2>/dev/null || true
+    chmod 600 "$fleet_backup"
     log_ok "Fleet config backed up to $fleet_backup"
   else
     agents=("$target")
@@ -840,6 +858,7 @@ cmd_backup() {
       "${name}/.env" \
       "${name}/docker-compose.yml" \
       2>/dev/null
+    chmod 600 "$backup_file"
 
     log_ok "Agent '$name' backed up to $backup_file"
   done
@@ -855,6 +874,11 @@ cmd_restore() {
   check_dependencies
   acquire_lock
   init_registry
+
+  # Validate backup tarball for path traversal before extracting
+  if tar -tzf "$backup_file" 2>/dev/null | grep -qE '(^/|\.\./)'; then
+    log_fatal "Malicious backup detected: contains absolute or traversal paths"
+  fi
 
   # Extract to temp dir to inspect
   local tmp_dir

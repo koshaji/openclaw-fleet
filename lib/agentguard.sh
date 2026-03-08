@@ -109,7 +109,7 @@ deregister_agent() {
   fi
 
   local agent_key
-  agent_key=$(jq -r ".agents[\"$name\"].agentguardKey // empty" \
+  agent_key=$(jq -r --arg name "$name" '.agents[$name].agentguardKey // empty' \
     "${FLEET_DIR}/agents/registry.json" 2>/dev/null)
 
   if [[ -n "$agent_key" ]]; then
@@ -132,7 +132,7 @@ kill_agent() {
   fi
 
   local agent_key
-  agent_key=$(jq -r ".agents[\"$name\"].agentguardKey // empty" \
+  agent_key=$(jq -r --arg name "$name" '.agents[$name].agentguardKey // empty' \
     "${FLEET_DIR}/agents/registry.json" 2>/dev/null)
 
   if [[ -z "$agent_key" ]]; then
@@ -166,7 +166,7 @@ agent_security_status() {
   fi
 
   local agent_key
-  agent_key=$(jq -r ".agents[\"$name\"].agentguardKey // empty" \
+  agent_key=$(jq -r --arg name "$name" '.agents[$name].agentguardKey // empty' \
     "${FLEET_DIR}/agents/registry.json" 2>/dev/null)
 
   if [[ -z "$agent_key" ]]; then

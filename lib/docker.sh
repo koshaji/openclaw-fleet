@@ -70,12 +70,9 @@ start_agent() {
 
   log_info "Starting agent '$name'..."
 
-  # Fix permissions
-  docker compose -f "${agent_dir}/docker-compose.yml" \
-    --env-file "${agent_dir}/.env" \
-    -p "openclaw-${name}" \
-    run --rm --user root --entrypoint sh openclaw-gateway -c \
-    'find /home/node/.openclaw -xdev -exec chown node:node {} + 2>/dev/null; true' 2>&1 || true
+  # Ensure workspace is writable by container user (uid 1000)
+  # Config dir is mounted read-only so no chown needed there
+  chmod -R u+rw "${agent_dir}/workspace" 2>/dev/null || true
 
   docker compose -f "${agent_dir}/docker-compose.yml" \
     --env-file "${agent_dir}/.env" \

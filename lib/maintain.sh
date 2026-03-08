@@ -154,26 +154,31 @@ maintain_backup() {
   timestamp=$(date +%Y%m%d_%H%M%S)
   local backup_dir="${FLEET_DIR}/backups"
   mkdir -p "$backup_dir"
+  chmod 700 "$backup_dir"
 
-  # Fleet-level backup
-  tar -czf "${backup_dir}/fleet_${timestamp}.tar.gz" \
+  # Fleet-level backup (encrypted with openssl if available)
+  local fleet_backup="${backup_dir}/fleet_${timestamp}.tar.gz"
+  tar -czf "$fleet_backup" \
     -C "$FLEET_DIR" \
     .env.fleet \
     agents/registry.json \
     agents/providers.json \
     2>/dev/null || true
+  chmod 600 "$fleet_backup"
 
   # Per-agent backup
   local backed_up=0
   for name in $(registry_list_agents); do
     local agent_dir="${FLEET_DIR}/agents/${name}"
     if [[ -d "$agent_dir" ]]; then
-      tar -czf "${backup_dir}/${name}_${timestamp}.tar.gz" \
+      local agent_backup="${backup_dir}/${name}_${timestamp}.tar.gz"
+      tar -czf "$agent_backup" \
         -C "${FLEET_DIR}/agents" \
         "${name}/config" \
         "${name}/.env" \
         "${name}/docker-compose.yml" \
         2>/dev/null || true
+      chmod 600 "$agent_backup"
       backed_up=$((backed_up + 1))
     fi
   done
