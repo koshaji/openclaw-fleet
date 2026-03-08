@@ -73,6 +73,75 @@ validate_name() {
   return 0
 }
 
+# Get available names from the pool (not yet in use)
+get_available_names() {
+  local existing
+  existing=$(registry_list_agents 2>/dev/null)
+  local available; available=()
+
+  for name in "${NAME_POOL[@]}"; do
+    if ! echo "$existing" | grep -qx "$name"; then
+      available+=("$name")
+    fi
+  done
+
+  echo "${available[*]}"
+}
+
+# Interactive name picker — shows available names and lets user choose
+# Usage: interactive_name_pick <agent_number> <total_count>
+interactive_name_pick() {
+  local agent_num="$1"
+  local total="$2"
+  local default
+  default=$(auto_name)
+
+  # Non-interactive mode: just return the default
+  if [[ ! -t 0 ]]; then
+    echo "$default"
+    return
+  fi
+
+  local available
+  available=$(get_available_names)
+
+  # Show up to 12 available names
+  local display_names
+  display_names=$(echo "$available" | tr ' ' '\n' | head -12 | tr '\n' ' ')
+  local total_available
+  total_available=$(echo "$available" | wc -w | tr -d ' ')
+
+  echo "" >&2
+  if [[ $total_available -gt 12 ]]; then
+    echo -e "  ${BOLD}Available names:${NC} ${display_names}(+$((total_available - 12)) more)" >&2
+  else
+    echo -e "  ${BOLD}Available names:${NC} ${display_names}" >&2
+  fi
+
+  while true; do
+    echo -en "  ${CYAN}Name for agent ${agent_num}/${total} [${default}]: ${NC}" >&2
+    read -r picked
+    picked="${picked:-$default}"
+
+    # Check if picked name is valid
+    if [[ ! "$picked" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]]; then
+      log_error "Must start with a letter, only letters/numbers/hyphens/underscores." >&2
+      continue
+    fi
+    if [[ ${#picked} -gt 30 ]]; then
+      log_error "Name too long (max 30 chars)." >&2
+      continue
+    fi
+    if [[ "$(registry_get_agent "$picked")" != "null" ]]; then
+      log_error "Name '$picked' already in use. Pick another." >&2
+      continue
+    fi
+
+    echo "$picked"
+    return
+  done
+}
+
 # Get the fleet manager name (host agent that oversees the fleet)
 get_fleet_manager_name() {
   echo "${FLEET_MANAGER_NAME:-mini4}"

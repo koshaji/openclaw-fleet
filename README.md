@@ -19,26 +19,49 @@ Each agent runs in its own Docker container with:
 - *Optional:* [1Password CLI](https://1password.com/downloads/command-line/) for secret management
 - *Optional:* [AgentGuard](https://agentguard.tech) for runtime policy enforcement
 
+## Install
+
+**One-line install (no git needed):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/koshaji/openclaw-fleet/main/install.sh | bash
+```
+
+This installs to `~/.openclaw-fleet/`, checks for Docker and jq, and offers to install them. Then add the alias it suggests and you're ready.
+
+To install to a custom directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/koshaji/openclaw-fleet/main/install.sh | bash -s -- --dir /opt/fleet
+```
+
+**Or clone the repo:**
+
+```bash
+git clone https://github.com/koshaji/openclaw-fleet && cd openclaw-fleet
+```
+
 ## Quick Start
 
 ```bash
-# 1. Clone this repo
-git clone https://github.com/koshaji/openclaw-fleet && cd openclaw-fleet
+# 1. Check how many agents your machine can handle
+fleet capacity
 
-# 2. Create 3 agents (will prompt for API provider and Telegram tokens on first run)
-./fleet.sh create 3
+# 2. Create your first agent (will prompt for API key and Telegram token)
+fleet create 1
 
-# 3. Check status (agent names shown here — auto-assigned from a pool like scout, relay, cipher)
-./fleet.sh status --deep
+# 3. Check status
+fleet status
 
-# 4. Pair your Telegram account with each bot (use names from status output)
-./fleet.sh pair <AGENT_NAME> <CODE_FROM_TELEGRAM>
+# 4. Pair your Telegram account (message the bot, get a code)
+fleet pair <AGENT_NAME> <CODE_FROM_TELEGRAM>
 ```
 
 ## Commands
 
 | Command | Description |
 |---|---|
+| `capacity` | Show max agents this machine can run |
 | `create <N>` | Create N new agents |
 | `status [--deep] [--json]` | Show fleet status table |
 | `update [--agent <name>]` | Rolling update to latest image |

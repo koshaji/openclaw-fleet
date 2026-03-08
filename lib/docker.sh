@@ -160,36 +160,145 @@ agent_exec() {
     exec openclaw-gateway node dist/index.js "$@" 2>&1
 }
 
+# Parse memory string (e.g., "2048M" or "4G") to MB
+parse_mem_mb() {
+  local mem_str="$1"
+  local num
+  num=$(echo "$mem_str" | sed 's/[MmGg]//')
+  if echo "$mem_str" | grep -qi 'g'; then
+    echo $((num * 1024))
+  else
+    echo "$num"
+  fi
+}
+
+# Detect hardware capacity (CPUs and RAM)
+detect_hardware() {
+  local hw_cpus=0
+  local hw_mem_mb=0
+
+  if [[ "${PLATFORM:-}" == "darwin" ]]; then
+    hw_cpus=$(sysctl -n hw.ncpu 2>/dev/null || echo 0)
+    local hw_mem_bytes
+    hw_mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+    hw_mem_mb=$((hw_mem_bytes / 1024 / 1024))
+  else
+    hw_cpus=$(nproc 2>/dev/null || echo 0)
+    hw_mem_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+  fi
+
+  echo "${hw_cpus}:${hw_mem_mb}"
+}
+
+# Calculate max agents this machine can run
+max_agents() {
+  local cpus_per="${FLEET_CPUS:-1.5}"
+  local mem_per_mb
+  mem_per_mb=$(parse_mem_mb "${FLEET_MEMORY:-2048M}")
+
+  local hw
+  hw=$(detect_hardware)
+  local hw_cpus="${hw%%:*}"
+  local hw_mem_mb="${hw##*:}"
+
+  if [[ "$hw_cpus" -eq 0 ]] || [[ "$hw_mem_mb" -eq 0 ]]; then
+    echo "0:0:0"
+    return
+  fi
+
+  # Use bc for float division, truncate to integer
+  local max_by_cpu
+  max_by_cpu=$(echo "$hw_cpus / $cpus_per" | bc 2>/dev/null || echo 0)
+  max_by_cpu="${max_by_cpu%%.*}"
+  local max_by_mem=$((hw_mem_mb / mem_per_mb))
+
+  # Use the smaller limit
+  local max=$max_by_cpu
+  if [[ $max_by_mem -lt $max ]]; then
+    max=$max_by_mem
+  fi
+
+  # Reserve ~25% for OS/Docker overhead
+  local recommended=$(( (max * 3) / 4 ))
+  if [[ $recommended -lt 1 ]] && [[ $max -ge 1 ]]; then
+    recommended=1
+  fi
+
+  echo "${max}:${recommended}:${hw_cpus}:${hw_mem_mb}"
+}
+
+# Show hardware capacity report
+show_capacity() {
+  local cpus_per="${FLEET_CPUS:-1.5}"
+  local mem_per="${FLEET_MEMORY:-2048M}"
+  local mem_per_mb
+  mem_per_mb=$(parse_mem_mb "$mem_per")
+
+  local result
+  result=$(max_agents)
+  local max="${result%%:*}"
+  local rest="${result#*:}"
+  local recommended="${rest%%:*}"
+  rest="${rest#*:}"
+  local hw_cpus="${rest%%:*}"
+  local hw_mem_mb="${rest##*:}"
+
+  local existing_count
+  existing_count=$(registry_list_agents 2>/dev/null | wc -l | tr -d ' ')
+  local remaining=$((recommended - existing_count))
+  if [[ $remaining -lt 0 ]]; then remaining=0; fi
+
+  echo ""
+  echo -e "${BOLD}Hardware Capacity${NC}"
+  echo "  CPUs:       ${hw_cpus} cores"
+  echo "  Memory:     $((hw_mem_mb / 1024)) GB"
+  echo ""
+  echo -e "${BOLD}Per-Agent Limits${NC}"
+  echo "  CPUs:       ${cpus_per} cores"
+  echo "  Memory:     ${mem_per}"
+  echo ""
+  echo -e "${BOLD}Fleet Capacity${NC}"
+  echo "  Maximum:    ${max} agents (hardware limit)"
+  echo "  Recommended: ${recommended} agents (with 25% OS/Docker headroom)"
+  echo "  Running:    ${existing_count} agents"
+  echo "  Available:  ${remaining} more agents"
+
+  if [[ "${PLATFORM:-}" == "darwin" ]]; then
+    echo ""
+    log_info "On macOS, Docker Desktop runs in a VM. Check Docker Desktop > Settings > Resources"
+    log_info "to see the actual CPU/memory allocated to Docker."
+  fi
+  echo ""
+}
+
 # Check available Docker resources
 check_resources() {
   local requested_agents="$1"
   local cpus_per="${FLEET_CPUS:-1.5}"
-  local mem_per="${FLEET_MEMORY:-2048M}"
-
-  # Strip M/G suffix for calculation
-  local mem_mb
-  mem_mb=$(echo "$mem_per" | sed 's/[MmGg]//;s/$//')
-  if echo "$mem_per" | grep -qi 'g'; then
-    mem_mb=$((mem_mb * 1024))
-  fi
-
-  local total_cpus_needed
-  total_cpus_needed=$(echo "$requested_agents * $cpus_per" | bc 2>/dev/null || echo "?")
-  local total_mem_needed
-  total_mem_needed=$((requested_agents * mem_mb))
+  local mem_per_mb
+  mem_per_mb=$(parse_mem_mb "${FLEET_MEMORY:-2048M}")
 
   local existing_count
   existing_count=$(registry_list_agents 2>/dev/null | wc -l | tr -d ' ')
-
   local total_agents=$((existing_count + requested_agents))
-  local total_mem=$((total_agents * mem_mb))
+
+  local total_cpus_needed
+  total_cpus_needed=$(echo "$total_agents * $cpus_per" | bc 2>/dev/null || echo "?")
+  local total_mem_mb=$((total_agents * mem_per_mb))
 
   log_info "Resource estimate for $total_agents total agents:"
-  log_info "  CPUs: ~${total_cpus_needed} cores needed"
-  log_info "  Memory: ~$((total_mem / 1024))GB needed (${mem_per} per agent)"
+  log_info "  CPUs: ~${total_cpus_needed} cores"
+  log_info "  Memory: ~$((total_mem_mb / 1024))GB (${FLEET_MEMORY:-2048M} per agent)"
 
-  if [[ $total_mem -gt 16384 ]]; then
-    log_warn "Total memory exceeds 16GB. Ensure Docker Desktop VM has sufficient allocation."
+  # Check against actual hardware
+  local result
+  result=$(max_agents)
+  local recommended
+  recommended=$(echo "$result" | cut -d: -f2)
+
+  if [[ "$recommended" -gt 0 ]] && [[ $total_agents -gt $recommended ]]; then
+    log_warn "This machine is recommended for ~${recommended} agents at current settings."
+    log_warn "You're requesting ${total_agents} total. Run './fleet.sh capacity' for details."
   fi
 }
 

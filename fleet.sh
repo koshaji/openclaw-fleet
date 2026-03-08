@@ -207,7 +207,7 @@ cmd_create() {
     elif [[ -n "$prefix" ]]; then
       name=$(next_agent_name "$prefix")
     else
-      name=$(auto_name)
+      name=$(interactive_name_pick "$i" "$count")
     fi
 
     # Validate name
@@ -758,6 +758,13 @@ cmd_logs() {
     logs --tail "$tail_n" $follow openclaw-gateway
 }
 
+cmd_capacity() {
+  detect_platform
+  source_fleet_env
+  init_registry
+  show_capacity
+}
+
 cmd_shell() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
@@ -1244,6 +1251,7 @@ Fleet Operations:
   reconfigure         Re-propagate fleet config to all agents
 
 Tools:
+  capacity            Show max agents this machine can run
   logs <name>         View agent logs (--tail N, --follow)
   shell <name>        Open shell in agent container
   pair <name> <code>  Approve Telegram pairing code
@@ -1274,6 +1282,7 @@ main() {
     stop)         cmd_stop "$@" ;;
     start)        cmd_start "$@" ;;
     logs)         cmd_logs "$@" ;;
+    capacity)     cmd_capacity ;;
     shell)        cmd_shell "$@" ;;
     reconfigure)  init_fleet_env; cmd_reconfigure "$@" ;;
     reconcile)    cmd_reconcile "$@" ;;
