@@ -130,6 +130,8 @@ services:
       - "127.0.0.1:\${OPENCLAW_BRIDGE_PORT:-${bridge_port}}:${bridge_port}"
     init: true
     restart: unless-stopped
+    cpus: '${cpus}'
+    mem_limit: ${memory}
     logging:
       driver: json-file
       options:
@@ -246,6 +248,153 @@ create_agent_files() {
   log_ok "Generated config files for agent '$name'"
 }
 
+# Create agent files using provider system (v2)
+# Falls back to legacy create_agent_files if no providers are configured
+create_agent_files_v2() {
+  local name="$1"
+  local gateway_port="$2"
+  local bridge_port="$3"
+  local gateway_token="$4"
+  local telegram_token="$5"
+
+  local agent_dir="${FLEET_DIR}/agents/${name}"
+
+  # Create directory structure
+  mkdir -p "${agent_dir}"/{config/{identity,agents/main/agent,agents/main/sessions},workspace}
+
+  # Check if providers.json exists and has subscriptions
+  local providers_file="${FLEET_DIR}/agents/providers.json"
+  if [[ -f "$providers_file" ]] && [[ "$(jq '.subscriptions | length' "$providers_file" 2>/dev/null)" -gt 0 ]]; then
+    # Use provider system for model config and auth profiles
+    local models_section
+    models_section=$(generate_model_config "$name")
+
+    local primary_model
+    primary_model=$(get_primary_model_string "$name")
+
+    local auth_section
+    auth_section=$(generate_agent_auth_profiles "$name")
+
+    # Build openclaw.json with provider-based models
+    jq -n \
+      --argjson port "$gateway_port" \
+      --arg token "$gateway_token" \
+      --arg tg_token "$telegram_token" \
+      --argjson models "$models_section" \
+      --arg primary "$primary_model" \
+      '{
+        gateway: {
+          port: $port,
+          mode: "local",
+          bind: "lan",
+          controlUi: {
+            allowedOrigins: [
+              ("http://localhost:" + ($port | tostring)),
+              ("http://127.0.0.1:" + ($port | tostring))
+            ]
+          },
+          auth: {
+            mode: "token",
+            token: $token
+          }
+        },
+        models: $models,
+        agents: {
+          defaults: {
+            model: { primary: $primary },
+            workspace: "/home/node/.openclaw/workspace",
+            compaction: { mode: "safeguard" },
+            maxConcurrent: 4
+          }
+        },
+        channels: {
+          telegram: {
+            enabled: true,
+            dmPolicy: "pairing",
+            botToken: $tg_token,
+            groupPolicy: "allowlist",
+            streaming: "partial"
+          }
+        },
+        browser: {
+          headless: true,
+          noSandbox: true
+        }
+      }' > "${agent_dir}/config/openclaw.json"
+
+    # Write auth profiles from provider system
+    echo "$auth_section" > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
+  else
+    # Legacy fallback: use ZAI_API_KEY from .env.fleet
+    local api_key="${ZAI_API_KEY:-}"
+    if [[ -z "$api_key" ]]; then
+      log_error "No providers configured and ZAI_API_KEY not set. Run: ./fleet.sh providers add"
+      return 1
+    fi
+    generate_openclaw_config "$gateway_port" "$gateway_token" "$telegram_token" \
+      > "${agent_dir}/config/openclaw.json"
+    generate_auth_profiles "$api_key" \
+      > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
+  fi
+
+  # Generate docker-compose and env (same for both paths)
+  generate_compose "$name" "$gateway_port" "$bridge_port" \
+    > "${agent_dir}/docker-compose.yml"
+
+  generate_env "$name" "$gateway_port" "$bridge_port" "$gateway_token" \
+    > "${agent_dir}/.env"
+
+  chmod 600 "${agent_dir}/.env"
+
+  log_ok "Generated config files for agent '$name'"
+}
+
+# Apply model config to a running agent (rewrites openclaw.json models + auth-profiles)
+apply_model_config() {
+  local name="$1"
+  local agent_dir="${FLEET_DIR}/agents/${name}"
+
+  if [[ ! -d "$agent_dir" ]]; then
+    log_error "Agent '$name' directory not found"
+    return 1
+  fi
+
+  local providers_file="${FLEET_DIR}/agents/providers.json"
+  if [[ ! -f "$providers_file" ]] || [[ "$(jq '.subscriptions | length' "$providers_file" 2>/dev/null)" -eq 0 ]]; then
+    log_error "No providers configured. Run: ./fleet.sh providers add"
+    return 1
+  fi
+
+  # Generate new model config
+  local models_section
+  models_section=$(generate_model_config "$name")
+
+  local primary_model
+  primary_model=$(get_primary_model_string "$name")
+
+  # Update openclaw.json — merge new models and primary model into existing config
+  local config_file="${agent_dir}/config/openclaw.json"
+  if [[ -f "$config_file" ]]; then
+    local updated
+    updated=$(jq \
+      --argjson models "$models_section" \
+      --arg primary "$primary_model" \
+      '.models = $models | .agents.defaults.model.primary = $primary' \
+      "$config_file")
+    echo "$updated" > "$config_file"
+  else
+    log_error "Config file not found for agent '$name'"
+    return 1
+  fi
+
+  # Update auth-profiles.json
+  local auth_section
+  auth_section=$(generate_agent_auth_profiles "$name")
+  echo "$auth_section" > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
+
+  log_ok "Applied model config to agent '$name'"
+}
+
 # Propagate fleet-wide settings to an existing agent
 propagate_config() {
   local name="$1"
@@ -259,15 +408,19 @@ propagate_config() {
   # Re-read fleet config
   source_fleet_env
 
-  local api_key="${ZAI_API_KEY}"
-  if [[ -z "$api_key" ]]; then
-    log_error "ZAI_API_KEY not set in .env.fleet"
-    return 1
+  # Update auth profiles using provider system or legacy
+  local providers_file="${FLEET_DIR}/agents/providers.json"
+  if [[ -f "$providers_file" ]] && [[ "$(jq '.subscriptions | length' "$providers_file" 2>/dev/null)" -gt 0 ]]; then
+    apply_model_config "$name"
+  else
+    local api_key="${ZAI_API_KEY:-}"
+    if [[ -z "$api_key" ]]; then
+      log_error "No providers configured and ZAI_API_KEY not set"
+      return 1
+    fi
+    generate_auth_profiles "$api_key" \
+      > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
   fi
-
-  # Update auth-profiles with current API key
-  generate_auth_profiles "$api_key" \
-    > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
 
   # Update image tag in docker-compose.yml
   local agent_info

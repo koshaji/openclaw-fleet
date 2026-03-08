@@ -32,6 +32,8 @@ source "${FLEET_DIR}/lib/ports.sh"
 source "${FLEET_DIR}/lib/config.sh"
 source "${FLEET_DIR}/lib/docker.sh"
 source "${FLEET_DIR}/lib/health.sh"
+source "${FLEET_DIR}/lib/models.sh"
+source "${FLEET_DIR}/lib/naming.sh"
 
 # --- Fleet env initialization ---
 
@@ -46,12 +48,10 @@ init_fleet_env() {
   log_info "First run — setting up fleet configuration..."
   echo ""
 
-  # Prompt for zai API key
-  echo -en "${CYAN}Enter your zai API key: ${NC}"
-  read -r ZAI_API_KEY
-  if [[ -z "$ZAI_API_KEY" ]]; then
-    log_fatal "zai API key is required."
-  fi
+  # Fleet manager name (the host OpenClaw instance overseeing the fleet)
+  echo -en "${CYAN}Fleet manager name (the host agent on this machine) [mini4]: ${NC}"
+  read -r manager_name
+  manager_name="${manager_name:-mini4}"
 
   # Defaults
   local base_port="${FLEET_BASE_PORT:-19000}"
@@ -76,12 +76,12 @@ init_fleet_env() {
   memory="${input_mem:-$memory}"
 
   cat > "$fleet_env" <<EOF
-ZAI_API_KEY=${ZAI_API_KEY}
-FLEET_BASE_PORT=${base_port}
-OPENCLAW_IMAGE_TAG=${image_tag}
-OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw
-FLEET_CPUS=${cpus}
-FLEET_MEMORY=${memory}
+FLEET_MANAGER_NAME='${manager_name}'
+FLEET_BASE_PORT='${base_port}'
+OPENCLAW_IMAGE_TAG='${image_tag}'
+OPENCLAW_IMAGE='ghcr.io/openclaw/openclaw'
+FLEET_CPUS='${cpus}'
+FLEET_MEMORY='${memory}'
 EOF
 
   chmod 600 "$fleet_env"
@@ -97,22 +97,30 @@ cmd_create() {
   shift || true
 
   if [[ -z "$count" ]] || ! [[ "$count" =~ ^[0-9]+$ ]] || [[ "$count" -lt 1 ]]; then
-    log_fatal "Usage: fleet.sh create <N> [--telegram-tokens <file|tok1,tok2>] [--prefix <name>]"
+    log_fatal "Usage: fleet.sh create <N> [--telegram-tokens <file|tok1,tok2>] [--name <name>] [--role <role>] [--model <sub/model>] [--fallback <sub/model>]"
   fi
 
   local telegram_tokens_arg=""
-  local prefix="agent"
+  local prefix=""
+  local custom_name=""
+  local role=""
+  local model_primary=""
+  local model_fallbacks; model_fallbacks=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --telegram-tokens) telegram_tokens_arg="$2"; shift 2 ;;
       --prefix)          prefix="$2"; shift 2 ;;
+      --name)            custom_name="$2"; shift 2 ;;
+      --role)            role="$2"; shift 2 ;;
+      --model)           model_primary="$2"; shift 2 ;;
+      --fallback)        model_fallbacks+=("$2"); shift 2 ;;
       *)                 log_fatal "Unknown option: $1" ;;
     esac
   done
 
   # Parse telegram tokens
-  local -a telegram_tokens=()
+  local telegram_tokens; telegram_tokens=()
   if [[ -n "$telegram_tokens_arg" ]]; then
     if [[ -f "$telegram_tokens_arg" ]]; then
       while IFS= read -r line; do
@@ -134,6 +142,19 @@ cmd_create() {
   check_disk_space 2
   check_resources "$count"
 
+  # Ensure at least one provider is configured (or legacy ZAI_API_KEY exists)
+  init_providers
+  local provider_count
+  provider_count=$(jq '.subscriptions | length' "$PROVIDERS_FILE" 2>/dev/null || echo 0)
+  if [[ "$provider_count" -eq 0 ]] && [[ -z "${ZAI_API_KEY:-}" ]]; then
+    echo ""
+    log_info "No AI provider configured yet. Let's set one up first."
+    log_info "You'll need an API key from your AI provider (Anthropic, OpenAI, zai, etc.)"
+    echo ""
+    interactive_add_subscription || log_fatal "At least one provider is required to create agents."
+    echo ""
+  fi
+
   # Pull image
   pull_image || log_fatal "Failed to pull image"
 
@@ -147,12 +168,30 @@ cmd_create() {
 
   local created=0
   local failed=0
-  local -a created_names=()
-  local -a failed_names=()
+  local created_names; created_names=()
+  local failed_names; failed_names=()
+
+  # Initialize providers for model allocation
+  init_providers
 
   for i in $(seq 1 "$count"); do
     local name
-    name=$(next_agent_name "$prefix")
+    if [[ -n "$custom_name" ]] && [[ "$count" -eq 1 ]]; then
+      name="$custom_name"
+    elif [[ -n "$role" ]]; then
+      name=$(auto_name "$role")
+    elif [[ -n "$prefix" ]]; then
+      name=$(next_agent_name "$prefix")
+    else
+      name=$(auto_name)
+    fi
+
+    # Validate name
+    if ! validate_name "$name"; then
+      failed=$((failed + 1))
+      failed_names+=("$name")
+      continue
+    fi
 
     log_info "--- Agent $i/$count: $name ---"
 
@@ -192,8 +231,13 @@ cmd_create() {
     registry_add_agent "$name" "$gw_port" "$br_port" "" "$gw_token"
     registry_set_state "$name" "creating"
 
-    # Create config files
-    if ! create_agent_files "$name" "$gw_port" "$br_port" "$gw_token" "$tg_token" "$ZAI_API_KEY"; then
+    # Allocate model if specified
+    if [[ -n "$model_primary" ]]; then
+      allocate_model "$name" "$model_primary" "${model_fallbacks[@]}" 2>/dev/null || true
+    fi
+
+    # Create config files (uses provider system if available, falls back to legacy)
+    if ! create_agent_files_v2 "$name" "$gw_port" "$br_port" "$gw_token" "$tg_token"; then
       log_error "Failed to create config for '$name'"
       registry_remove_agent "$name"
       rm -rf "${FLEET_DIR}/agents/${name}"
@@ -212,15 +256,15 @@ cmd_create() {
     fi
 
     # Wait for health
-    log_info "Waiting for '$name' to become healthy..."
+    log_info "Waiting for '$name' to become healthy (may take up to 2 minutes)..."
     local healthy=false
     for attempt in $(seq 1 12); do
       sleep 10
+      printf "  Checking health (%d/12)...\r" "$attempt"
       if [[ "$(check_agent_health "$name")" == "healthy" ]]; then
         healthy=true
         break
       fi
-      echo -n "."
     done
     echo ""
 
@@ -376,7 +420,7 @@ cmd_update() {
     fi
 
     # Stagger between agents
-    if [[ "$name" != "${agents_to_update[-1]}" ]]; then
+    if [[ "$name" != "${agents_to_update[${#agents_to_update[@]}-1]}" ]]; then
       stagger_delay 5
     fi
   done
@@ -466,17 +510,22 @@ cmd_clone() {
   mkdir -p "${target_dir}/config/identity"
   mkdir -p "${target_dir}/config/agents/main/sessions"
 
-  # Regenerate config with new values
+  # Regenerate config with new values using v2 provider system
   source_fleet_env
-  generate_openclaw_config "$gw_port" "$gw_token" "$tg_token" \
-    > "${target_dir}/config/openclaw.json"
-  generate_auth_profiles "$ZAI_API_KEY" \
-    > "${target_dir}/config/agents/main/agent/auth-profiles.json"
-  generate_compose "$target" "$gw_port" "$br_port" \
-    > "${target_dir}/docker-compose.yml"
-  generate_env "$target" "$gw_port" "$br_port" "$gw_token" \
-    > "${target_dir}/.env"
-  chmod 600 "${target_dir}/.env"
+  init_providers
+
+  # Copy source model allocation if it exists
+  local src_allocation
+  src_allocation=$(get_agent_allocation "$source")
+  if [[ "$src_allocation" != "null" ]]; then
+    local src_primary
+    src_primary=$(echo "$src_allocation" | jq -r '.primary')
+    local src_fallbacks
+    src_fallbacks=$(echo "$src_allocation" | jq -r '.fallbacks[]? // empty')
+    allocate_model "$target" "$src_primary" $src_fallbacks 2>/dev/null || true
+  fi
+
+  create_agent_files_v2 "$target" "$gw_port" "$br_port" "$gw_token" "$tg_token"
 
   # Register and start
   registry_add_agent "$target" "$gw_port" "$br_port" "" "$gw_token"
@@ -569,7 +618,7 @@ cmd_restart() {
 
   for name in "${agents[@]}"; do
     restart_agent "$name"
-    if [[ "$target" == "--all" ]] && [[ "$name" != "${agents[-1]}" ]]; then
+    if [[ "$target" == "--all" ]] && [[ "$name" != "${agents[${#agents[@]}-1]}" ]]; then
       stagger_delay 5
     fi
   done
@@ -622,7 +671,7 @@ cmd_start() {
   for name in "${agents[@]}"; do
     start_agent "$name"
     registry_set_state "$name" "running"
-    if [[ "$target" == "--all" ]] && [[ "$name" != "${agents[-1]}" ]]; then
+    if [[ "$target" == "--all" ]] && [[ "$name" != "${agents[${#agents[@]}-1]}" ]]; then
       stagger_delay 5
     fi
   done
@@ -694,7 +743,7 @@ cmd_reconfigure() {
     restart_agent "$name"
     log_ok "Agent '$name' reconfigured and restarted"
 
-    if [[ "$name" != "${agents[-1]}" ]]; then
+    if [[ "$name" != "${agents[${#agents[@]}-1]}" ]]; then
       stagger_delay 3
     fi
   done
@@ -804,17 +853,20 @@ cmd_restore() {
   local tg_token
   tg_token=$(jq -r '.channels.telegram.botToken // ""' "${agent_dir}/config/openclaw.json" 2>/dev/null)
 
-  # Regenerate with new ports/token
+  # Validate telegram token was extracted
+  if [[ -z "$tg_token" ]]; then
+    echo -en "${CYAN}Telegram token not found in backup. Enter token: ${NC}"
+    read -r tg_token
+    if [[ -z "$tg_token" ]]; then
+      rm -rf "$tmp_dir"
+      log_fatal "Telegram token is required."
+    fi
+  fi
+
+  # Regenerate with new ports/token using v2 provider system
   source_fleet_env
-  generate_openclaw_config "$gw_port" "$gw_token" "$tg_token" \
-    > "${agent_dir}/config/openclaw.json"
-  generate_auth_profiles "$ZAI_API_KEY" \
-    > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
-  generate_compose "$agent_name" "$gw_port" "$br_port" \
-    > "${agent_dir}/docker-compose.yml"
-  generate_env "$agent_name" "$gw_port" "$br_port" "$gw_token" \
-    > "${agent_dir}/.env"
-  chmod 600 "${agent_dir}/.env"
+  init_providers
+  create_agent_files_v2 "$agent_name" "$gw_port" "$br_port" "$gw_token" "$tg_token"
 
   # Clean identity files (will be regenerated)
   rm -rf "${agent_dir}/config/identity"
@@ -865,49 +917,115 @@ cmd_pair() {
   log_ok "Pairing code '$code' approved for agent '$name'"
 }
 
+cmd_providers() {
+  local action="${1:-list}"
+  shift || true
+
+  init_providers
+
+  case "$action" in
+    add)
+      if [[ $# -ge 3 ]]; then
+        # Non-interactive: providers add <name> <type> <api_key> [label] [base_url]
+        add_subscription "$@"
+      else
+        interactive_add_subscription
+      fi
+      ;;
+    remove)
+      local name="${1:-}"
+      if [[ -z "$name" ]]; then
+        log_fatal "Usage: fleet.sh providers remove <name>"
+      fi
+      remove_subscription "$name"
+      ;;
+    list)
+      list_subscriptions
+      ;;
+    *)
+      log_fatal "Usage: fleet.sh providers [add|remove|list]"
+      ;;
+  esac
+}
+
+cmd_models() {
+  local action="${1:-list}"
+  shift || true
+
+  init_providers
+  init_registry
+
+  case "$action" in
+    assign)
+      local agent="${1:-}"
+      local primary="${2:-}"
+      shift 2 || true
+
+      if [[ -z "$agent" ]] || [[ -z "$primary" ]]; then
+        interactive_allocate_model "$agent"
+      else
+        allocate_model "$agent" "$primary" "$@"
+      fi
+
+      # Apply the allocation to the running agent
+      local agent_dir="${FLEET_DIR}/agents/${agent}"
+      if [[ -d "$agent_dir" ]]; then
+        log_info "Applying model config to agent '$agent'..."
+        apply_model_config "$agent"
+        restart_agent "$agent" 2>/dev/null || log_warn "Agent '$agent' not running. Config saved for next start."
+      fi
+      ;;
+    list)
+      print_allocations
+      ;;
+    *)
+      log_fatal "Usage: fleet.sh models [assign|list]"
+      ;;
+  esac
+}
+
 cmd_help() {
-  cat <<'HELP'
-OpenClaw Fleet Manager
+  local manager
+  manager=$(get_fleet_manager_name)
+  cat <<HELP
+OpenClaw Fleet Manager (managed by: ${manager})
 
 Usage:
   fleet.sh <command> [options]
 
-Commands:
+Agent Lifecycle:
   create <N>          Create N new agents
+    --name <name>       Custom name (single agent only)
+    --role <role>       Role-based naming (e.g., researcher, coder)
+    --model <sub/model> Primary model (e.g., anthropic-max1/claude-opus-4-6)
+    --fallback <s/m>    Fallback model (repeatable)
     --telegram-tokens   File or comma-separated list of bot tokens
-    --prefix            Agent name prefix (default: agent)
-
-  status              Show fleet status
-    --deep              Include Telegram connectivity check
-    --json              Output as JSON
-
-  update              Pull latest image and rolling-update all agents
-    --agent <name>      Update only a specific agent
-
-  clone <src> <dst>   Clone an agent's config to a new agent
-    --config-only       Don't copy workspace data
 
   destroy <name>      Destroy an agent (or --all)
-    --keep-data         Keep config/workspace files
-    --force             Skip confirmation
+  clone <src> <dst>   Clone an agent's config to a new agent
+  status [--deep]     Show fleet status (--json for scripting)
 
+Provider & Model Management:
+  providers add       Add an AI provider subscription (interactive)
+  providers list      List all subscriptions and available models
+  providers remove    Remove a subscription
+
+  models assign       Assign primary + fallback models to an agent
+  models list         Show current model allocations
+
+Fleet Operations:
+  update              Rolling update to latest OpenClaw image
   restart <name>      Restart agent (or --all)
-  stop <name>         Stop agent (or --all)
-  start <name>        Start agent (or --all)
+  stop / start        Stop or start agents
+  reconfigure         Re-propagate fleet config to all agents
+
+Tools:
   logs <name>         View agent logs (--tail N, --follow)
   shell <name>        Open shell in agent container
-
-  reconfigure         Re-propagate fleet config to agents
-    --agent <name>      Reconfigure only a specific agent
-
-  reconcile           Sync registry with actual Docker state
-  backup [name]       Backup agent configs (or --all)
-  restore <file>      Restore agent from backup
   pair <name> <code>  Approve Telegram pairing code
-  watchdog            Manage health watchdog
-    install             Install cron job (every 5 min)
-    uninstall           Remove cron job
-    run                 Run one watchdog check
+  reconcile           Sync registry with Docker state
+  backup / restore    Backup and restore agent configs
+  watchdog            Health watchdog (install/uninstall/run)
 
 HELP
 }
@@ -938,6 +1056,8 @@ main() {
     restore)      init_fleet_env; cmd_restore "$@" ;;
     watchdog)     cmd_watchdog "$@" ;;
     pair)         cmd_pair "$@" ;;
+    providers)    source_fleet_env; cmd_providers "$@" ;;
+    models)       source_fleet_env; cmd_models "$@" ;;
     help|--help|-h) cmd_help ;;
     *)            log_error "Unknown command: $command"; cmd_help; exit 1 ;;
   esac

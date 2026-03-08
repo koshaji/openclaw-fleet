@@ -22,16 +22,14 @@ Each agent runs in its own Docker container with:
 # 1. Clone this repo
 git clone <repo-url> openclaw-fleet && cd openclaw-fleet
 
-# 2. Create 3 agents (will prompt for API key and Telegram tokens on first run)
+# 2. Create 3 agents (will prompt for API provider and Telegram tokens on first run)
 ./fleet.sh create 3
 
-# 3. Check status
+# 3. Check status (agent names shown here — auto-assigned from a pool like scout, relay, cipher)
 ./fleet.sh status --deep
 
-# 4. Pair your Telegram account with each bot
-./fleet.sh pair agent1 <CODE_FROM_TELEGRAM>
-./fleet.sh pair agent2 <CODE_FROM_TELEGRAM>
-./fleet.sh pair agent3 <CODE_FROM_TELEGRAM>
+# 4. Pair your Telegram account with each bot (use names from status output)
+./fleet.sh pair <AGENT_NAME> <CODE_FROM_TELEGRAM>
 ```
 
 ## Commands
@@ -52,6 +50,8 @@ git clone <repo-url> openclaw-fleet && cd openclaw-fleet
 | `backup [name\|--all]` | Backup agent configs |
 | `restore <file.tar.gz>` | Restore agent from backup |
 | `pair <name> <code>` | Approve Telegram pairing code |
+| `providers [add\|list\|remove]` | Manage AI provider subscriptions |
+| `models [assign\|list]` | Assign models to agents |
 | `watchdog install/uninstall` | Manage auto-restart cron job |
 
 ## Configuration
@@ -59,11 +59,18 @@ git clone <repo-url> openclaw-fleet && cd openclaw-fleet
 On first run, `fleet.sh` creates `.env.fleet` with:
 
 ```bash
-ZAI_API_KEY=your-api-key        # Shared across all agents
+FLEET_MANAGER_NAME=mini4         # Name of the host agent managing the fleet
 FLEET_BASE_PORT=19000            # Port allocation starts here
 OPENCLAW_IMAGE_TAG=latest        # Pin to a version for stability
 FLEET_CPUS=1.5                   # CPU limit per agent
 FLEET_MEMORY=2048M               # Memory limit per agent
+```
+
+API keys are managed separately via the provider system:
+```bash
+./fleet.sh providers add          # Interactive — add API keys for Anthropic, OpenAI, zai, etc.
+./fleet.sh providers list         # See all configured providers and available models
+./fleet.sh models assign <agent> <provider/model>  # Assign models to agents
 ```
 
 ### Resource Planning
