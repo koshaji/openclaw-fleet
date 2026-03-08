@@ -398,7 +398,7 @@ apply_model_config() {
       --arg primary "$primary_model" \
       '.models = $models | .agents.defaults.model.primary = $primary' \
       "$config_file")
-    echo "$updated" > "$config_file"
+    atomic_json_write "$config_file" "$updated"
   else
     log_error "Config file not found for agent '$name'"
     return 1
@@ -407,7 +407,7 @@ apply_model_config() {
   # Update auth-profiles.json
   local auth_section
   auth_section=$(generate_agent_auth_profiles "$name")
-  echo "$auth_section" > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
+  atomic_json_write "${agent_dir}/config/agents/main/agent/auth-profiles.json" "$auth_section"
 
   log_ok "Applied model config to agent '$name'"
 }

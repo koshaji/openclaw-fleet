@@ -243,7 +243,7 @@ cmd_create() {
 
     # Allocate model if specified
     if [[ -n "$model_primary" ]]; then
-      allocate_model "$name" "$model_primary" "${model_fallbacks[@]}" 2>/dev/null || true
+      allocate_model "$name" "$model_primary" ${model_fallbacks[@]+"${model_fallbacks[@]}"} 2>/dev/null || true
     fi
 
     # Create config files (uses provider system if available, falls back to legacy)
@@ -486,6 +486,10 @@ cmd_clone() {
     log_fatal "Target agent '$target' already exists."
   fi
 
+  if ! validate_name "$target"; then
+    log_fatal "Invalid agent name: '$target'"
+  fi
+
   local source_dir="${FLEET_DIR}/agents/${source}"
   local target_dir="${FLEET_DIR}/agents/${target}"
 
@@ -507,7 +511,7 @@ cmd_clone() {
   # Create target directory
   mkdir -p "${target_dir}"
 
-  if [[ "$config_only" == "false" ]]; then
+  if [[ "$config_only" == "false" ]] && [[ -d "${source_dir}/workspace" ]]; then
     # Copy workspace
     log_info "Copying workspace from '$source' to '$target'..."
     cp -a "${source_dir}/workspace" "${target_dir}/workspace"
@@ -627,6 +631,7 @@ cmd_restart() {
   fi
 
   detect_platform
+  acquire_lock
   init_registry
 
   local agents=()
@@ -639,6 +644,10 @@ cmd_restart() {
   fi
 
   for name in "${agents[@]}"; do
+    if [[ "$(registry_get_agent "$name")" == "null" ]]; then
+      log_error "Agent '$name' not found in registry"
+      continue
+    fi
     restart_agent "$name"
     if [[ "$target" == "--all" ]] && [[ "$name" != "${agents[${#agents[@]}-1]}" ]]; then
       stagger_delay 5
@@ -666,6 +675,10 @@ cmd_stop() {
   fi
 
   for name in "${agents[@]}"; do
+    if [[ "$(registry_get_agent "$name")" == "null" ]]; then
+      log_error "Agent '$name' not found in registry"
+      continue
+    fi
     stop_agent "$name"
     registry_set_state "$name" "stopped"
   done
@@ -691,6 +704,10 @@ cmd_start() {
   fi
 
   for name in "${agents[@]}"; do
+    if [[ "$(registry_get_agent "$name")" == "null" ]]; then
+      log_error "Agent '$name' not found in registry"
+      continue
+    fi
     start_agent "$name"
     registry_set_state "$name" "running"
     if [[ "$target" == "--all" ]] && [[ "$name" != "${agents[${#agents[@]}-1]}" ]]; then
@@ -853,6 +870,11 @@ cmd_restore() {
     log_fatal "Could not determine agent name from backup"
   fi
 
+  if ! validate_name "$agent_name" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    log_fatal "Invalid agent name in backup: '$agent_name'"
+  fi
+
   if [[ "$(registry_get_agent "$agent_name")" != "null" ]]; then
     rm -rf "$tmp_dir"
     log_fatal "Agent '$agent_name' already exists. Destroy it first or use a different name."
@@ -1009,6 +1031,10 @@ cmd_models() {
       if [[ -z "$agent" ]] || [[ -z "$primary" ]]; then
         interactive_allocate_model "$agent"
       else
+        # Verify agent exists
+        if [[ "$(registry_get_agent "$agent")" == "null" ]]; then
+          log_fatal "Agent '$agent' not found in registry. Run: ./fleet.sh status"
+        fi
         shift 2
         allocate_model "$agent" "$primary" "$@"
       fi

@@ -179,6 +179,7 @@ allocate_model() {
   local agent_name="$1"
   local primary="$2"
   shift 2
+  local fallback_count=$#
   local fallbacks; fallbacks=("$@")
 
   init_providers
@@ -195,7 +196,7 @@ allocate_model() {
 
   # Build fallbacks array
   local fallbacks_json="[]"
-  if [[ ${#fallbacks[@]} -gt 0 ]]; then
+  if [[ $fallback_count -gt 0 ]]; then
     fallbacks_json=$(printf '%s\n' "${fallbacks[@]}" | jq -R . | jq -s .)
   fi
 
@@ -213,7 +214,7 @@ allocate_model() {
   atomic_json_write "$PROVIDERS_FILE" "$updated"
   chmod 600 "$PROVIDERS_FILE"
   log_ok "Allocated '$primary' to agent '$agent_name'"
-  if [[ ${#fallbacks[@]} -gt 0 ]]; then
+  if [[ $fallback_count -gt 0 ]]; then
     log_ok "  Fallbacks: ${fallbacks[*]}"
   fi
 }
@@ -476,7 +477,7 @@ interactive_allocate_model() {
     fallbacks+=("$fb")
   done
 
-  allocate_model "$agent_name" "$primary" "${fallbacks[@]}"
+  allocate_model "$agent_name" "$primary" ${fallbacks[@]+"${fallbacks[@]}"}
 }
 
 # Print model allocations for all agents

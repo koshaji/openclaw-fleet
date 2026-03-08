@@ -106,6 +106,11 @@ restart_agent() {
   local name="$1"
   local agent_dir="${FLEET_DIR}/agents/${name}"
 
+  if [[ ! -f "${agent_dir}/docker-compose.yml" ]]; then
+    log_error "No docker-compose.yml found for agent '$name'"
+    return 1
+  fi
+
   docker compose -f "${agent_dir}/docker-compose.yml" \
     --env-file "${agent_dir}/.env" \
     -p "openclaw-${name}" \
