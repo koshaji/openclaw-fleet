@@ -31,23 +31,45 @@ get_provider_url() {
 ANTHROPIC_MODELS='[
   {"id":"claude-opus-4-6","name":"Claude Opus 4.6","reasoning":true,"input":["text","image"],"contextWindow":200000,"maxTokens":32000},
   {"id":"claude-sonnet-4-6","name":"Claude Sonnet 4.6","reasoning":true,"input":["text","image"],"contextWindow":200000,"maxTokens":16000},
-  {"id":"claude-haiku-4-5","name":"Claude Haiku 4.5","reasoning":false,"input":["text","image"],"contextWindow":200000,"maxTokens":8192}
+  {"id":"claude-haiku-4-5","name":"Claude Haiku 4.5","reasoning":false,"input":["text","image"],"contextWindow":200000,"maxTokens":8192},
+  {"id":"claude-opus-4-20250514","name":"Claude Opus 4","reasoning":true,"input":["text","image"],"contextWindow":200000,"maxTokens":32000},
+  {"id":"claude-sonnet-4-20250514","name":"Claude Sonnet 4","reasoning":true,"input":["text","image"],"contextWindow":200000,"maxTokens":16000},
+  {"id":"claude-sonnet-4-5-20241022","name":"Claude Sonnet 3.5 v2","reasoning":false,"input":["text","image"],"contextWindow":200000,"maxTokens":8192}
 ]'
 
 OPENAI_MODELS='[
   {"id":"gpt-4o","name":"GPT-4o","reasoning":false,"input":["text","image"],"contextWindow":128000,"maxTokens":16384},
+  {"id":"gpt-4o-mini","name":"GPT-4o Mini","reasoning":false,"input":["text","image"],"contextWindow":128000,"maxTokens":16384},
   {"id":"o3","name":"o3","reasoning":true,"input":["text"],"contextWindow":200000,"maxTokens":100000},
-  {"id":"o4-mini","name":"o4-mini","reasoning":true,"input":["text","image"],"contextWindow":200000,"maxTokens":100000}
+  {"id":"o3-mini","name":"o3-mini","reasoning":true,"input":["text"],"contextWindow":200000,"maxTokens":100000},
+  {"id":"o4-mini","name":"o4-mini","reasoning":true,"input":["text","image"],"contextWindow":200000,"maxTokens":100000},
+  {"id":"gpt-4-turbo","name":"GPT-4 Turbo","reasoning":false,"input":["text","image"],"contextWindow":128000,"maxTokens":4096}
 ]'
 
 GOOGLE_MODELS='[
   {"id":"gemini-2.5-pro","name":"Gemini 2.5 Pro","reasoning":true,"input":["text","image"],"contextWindow":1000000,"maxTokens":65536},
-  {"id":"gemini-2.5-flash","name":"Gemini 2.5 Flash","reasoning":false,"input":["text","image"],"contextWindow":1000000,"maxTokens":65536}
+  {"id":"gemini-2.5-flash","name":"Gemini 2.5 Flash","reasoning":false,"input":["text","image"],"contextWindow":1000000,"maxTokens":65536},
+  {"id":"gemini-2.0-flash","name":"Gemini 2.0 Flash","reasoning":false,"input":["text","image"],"contextWindow":1000000,"maxTokens":8192},
+  {"id":"gemini-2.0-flash-lite","name":"Gemini 2.0 Flash Lite","reasoning":false,"input":["text","image"],"contextWindow":1000000,"maxTokens":8192}
 ]'
 
 ZAI_MODELS='[
   {"id":"glm-5","name":"GLM-5","reasoning":true,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":204800,"maxTokens":131072},
   {"id":"glm-4.7","name":"GLM-4.7","reasoning":true,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":204800,"maxTokens":131072}
+]'
+
+OLLAMA_MODELS='[
+  {"id":"llama3.3","name":"Llama 3.3 70B","reasoning":false,"input":["text"],"contextWindow":131072,"maxTokens":8192},
+  {"id":"qwen3","name":"Qwen 3","reasoning":true,"input":["text"],"contextWindow":131072,"maxTokens":8192},
+  {"id":"deepseek-r1","name":"DeepSeek R1","reasoning":true,"input":["text"],"contextWindow":131072,"maxTokens":8192},
+  {"id":"mistral","name":"Mistral 7B","reasoning":false,"input":["text"],"contextWindow":32768,"maxTokens":4096}
+]'
+
+OPENROUTER_MODELS='[
+  {"id":"anthropic/claude-opus-4-6","name":"Claude Opus 4.6 (OpenRouter)","reasoning":true,"input":["text","image"],"contextWindow":200000,"maxTokens":32000},
+  {"id":"openai/gpt-4o","name":"GPT-4o (OpenRouter)","reasoning":false,"input":["text","image"],"contextWindow":128000,"maxTokens":16384},
+  {"id":"google/gemini-2.5-pro","name":"Gemini 2.5 Pro (OpenRouter)","reasoning":true,"input":["text","image"],"contextWindow":1000000,"maxTokens":65536},
+  {"id":"deepseek/deepseek-r1","name":"DeepSeek R1 (OpenRouter)","reasoning":true,"input":["text"],"contextWindow":131072,"maxTokens":8192}
 ]'
 
 # Initialize providers registry
@@ -89,6 +111,8 @@ add_subscription() {
     openai)     models_json="$OPENAI_MODELS" ;;
     google)     models_json="$GOOGLE_MODELS" ;;
     zai)        models_json="$ZAI_MODELS" ;;
+    ollama)     models_json="$OLLAMA_MODELS" ;;
+    openrouter) models_json="$OPENROUTER_MODELS" ;;
     *)          models_json="[]" ;;
   esac
 
@@ -396,6 +420,24 @@ get_primary_model_string() {
   echo "$allocation" | jq -r '.primary'
 }
 
+# Discover models from OpenClaw CLI (if available and provider is configured)
+discover_models() {
+  local type="$1"
+  local api_key="$2"
+  local base_url="${3:-}"
+
+  # Try openclaw models scan if available
+  if command -v openclaw &>/dev/null; then
+    local scan_result
+    scan_result=$(openclaw models scan --provider "$type" 2>/dev/null | tail -n +2 || true)
+    if [[ -n "$scan_result" ]]; then
+      echo "$scan_result"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 # Interactive provider setup
 interactive_add_subscription() {
   echo ""
@@ -447,7 +489,50 @@ interactive_add_subscription() {
     base_url="${input_url:-$default_url}"
   fi
 
+  # Offer to add custom model IDs
+  echo ""
+  echo -e "  ${BOLD}Default models for $type:${NC}"
+  local default_models
+  case "$type" in
+    anthropic)  default_models="$ANTHROPIC_MODELS" ;;
+    openai)     default_models="$OPENAI_MODELS" ;;
+    google)     default_models="$GOOGLE_MODELS" ;;
+    zai)        default_models="$ZAI_MODELS" ;;
+    ollama)     default_models="$OLLAMA_MODELS" ;;
+    openrouter) default_models="$OPENROUTER_MODELS" ;;
+    *)          default_models="[]" ;;
+  esac
+  echo "$default_models" | jq -r '.[] | "    \(.id) — \(.name)"' 2>/dev/null
+
+  echo ""
+  echo -en "${CYAN}Add custom model IDs? (comma-separated, or Enter to use defaults): ${NC}"
+  read -r custom_models
+
+  if [[ -n "$custom_models" ]]; then
+    # Parse comma-separated model IDs and add them to the defaults
+    local extra_json="[]"
+    IFS=',' read -ra model_ids <<< "$custom_models"
+    for mid in "${model_ids[@]}"; do
+      mid=$(echo "$mid" | xargs)  # trim whitespace
+      [[ -z "$mid" ]] && continue
+      extra_json=$(echo "$extra_json" | jq --arg id "$mid" --arg name "$mid" \
+        '. + [{"id": $id, "name": $name, "reasoning": false, "input": ["text"], "contextWindow": 128000, "maxTokens": 8192}]')
+    done
+    # Merge with defaults
+    default_models=$(echo "$default_models" "$extra_json" | jq -s '.[0] + .[1] | unique_by(.id)')
+  fi
+
   add_subscription "$name" "$type" "$api_key" "$label" "$base_url"
+
+  # Override with discovered/custom models if any
+  if [[ -n "$custom_models" ]]; then
+    local updated
+    updated=$(jq --arg name "$name" --argjson models "$default_models" \
+      '.subscriptions[$name].models = $models' "$PROVIDERS_FILE")
+    atomic_json_write "$PROVIDERS_FILE" "$updated"
+    chmod 600 "$PROVIDERS_FILE"
+    log_ok "Updated models for subscription '$name'"
+  fi
 }
 
 # Interactive model allocation

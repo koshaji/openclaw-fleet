@@ -1364,14 +1364,28 @@ cmd_setup() {
   local hostname_short
   hostname_short=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "fleet")
 
-  echo -en "  ${CYAN}Manager name [${hostname_short}]: ${NC}"
-  read -r manager_name
+  # Detect active OpenClaw profile
+  local oc_profile=""
+  local oc_config_dir="$HOME/.openclaw"
+  for profile_dir in "$HOME"/.openclaw-*/openclaw.json; do
+    if [[ -f "$profile_dir" ]]; then
+      local pname
+      pname=$(basename "$(dirname "$profile_dir")")
+      pname="${pname#.openclaw-}"
+      oc_profile="$pname"
+      oc_config_dir="$HOME/.openclaw-${pname}"
+      log_info "Detected active OpenClaw profile: ${pname} (${oc_config_dir})"
+      break
+    fi
+  done
+
+  prompt_with_retry "Manager name [${hostname_short}]" manager_name "" true
   manager_name="${manager_name:-$hostname_short}"
 
-  # Validate
   local bad_chars='[$`"'"'"'\\;|&!(){}]'
   if [[ "$manager_name" =~ $bad_chars ]]; then
-    log_fatal "Name contains invalid characters"
+    log_warn "Name contains invalid characters, using hostname"
+    manager_name="$hostname_short"
   fi
 
   echo ""
@@ -1402,14 +1416,83 @@ cmd_setup() {
 
   echo ""
 
+  # --- Step 4b: 1Password Integration ---
+  echo -e "${BOLD}Step 4b: Secret Management (1Password)${NC}"
+  echo ""
+
+  if command -v op &>/dev/null; then
+    log_ok "1Password CLI found"
+    if op account list &>/dev/null 2>&1; then
+      log_ok "1Password CLI authenticated"
+      echo ""
+      echo "  1Password can store API keys securely instead of plaintext."
+      echo -en "  ${CYAN}Migrate secrets to 1Password? [Y/n]: ${NC}"
+      read -r migrate_choice
+      if [[ ! "$migrate_choice" =~ ^[Nn]$ ]]; then
+        migrate_to_op || log_warn "1Password migration skipped (non-fatal)"
+      fi
+    else
+      log_info "1Password CLI found but not signed in."
+      echo -en "  ${CYAN}Sign in now? [y/N]: ${NC}"
+      read -r op_signin
+      if [[ "$op_signin" =~ ^[Yy]$ ]]; then
+        eval "$(op signin 2>&1)" || log_warn "1Password sign-in failed (non-fatal)"
+        if op account list &>/dev/null 2>&1; then
+          log_ok "Signed in to 1Password"
+          echo -en "  ${CYAN}Migrate secrets to 1Password? [Y/n]: ${NC}"
+          read -r migrate_choice
+          if [[ ! "$migrate_choice" =~ ^[Nn]$ ]]; then
+            migrate_to_op || log_warn "1Password migration skipped"
+          fi
+        fi
+      fi
+    fi
+  else
+    log_info "1Password CLI not found. Secrets stored in plaintext (chmod 600)."
+    echo ""
+    echo "  To enable 1Password integration later:"
+    echo "    1. Install: https://developer.1password.com/docs/cli/get-started/"
+    echo "    2. Sign in: op signin"
+    echo "    3. Migrate: fleet secrets migrate"
+
+    # Offer to install 1Password CLI
+    if [[ "${PLATFORM:-}" == "darwin" ]]; then
+      echo ""
+      if command -v brew &>/dev/null; then
+        echo -en "  ${CYAN}Install 1Password CLI now? [y/N]: ${NC}"
+        read -r install_op
+        if [[ "$install_op" =~ ^[Yy]$ ]]; then
+          if brew install --cask 1password-cli 2>&1; then
+            log_ok "1Password CLI installed"
+            log_info "Sign in with: op signin"
+          else
+            log_warn "1Password CLI installation failed (non-fatal)"
+          fi
+        fi
+      else
+        echo "    Or install Homebrew first, then: brew install --cask 1password-cli"
+      fi
+    elif command -v apt-get &>/dev/null; then
+      echo "    Or: sudo apt-get install 1password-cli"
+    fi
+  fi
+
+  echo ""
+
   # --- Step 5: Telegram bot for manager ---
   echo -e "${BOLD}Step 5: Telegram Bot (Manager)${NC}"
   echo ""
 
   local manager_bot_token=""
   local existing_bot_token=""
+  # Check existing config (profile-aware)
   existing_bot_token=$(jq -r '.channels.telegram.botToken // empty' \
-    ~/.openclaw/openclaw.json 2>/dev/null)
+    "${oc_config_dir}/openclaw.json" 2>/dev/null)
+  # Also check the inner .openclaw dir
+  if [[ -z "$existing_bot_token" ]]; then
+    existing_bot_token=$(jq -r '.channels.telegram.botToken // empty' \
+      "${oc_config_dir}/.openclaw/openclaw.json" 2>/dev/null)
+  fi
 
   if [[ -n "$existing_bot_token" ]]; then
     # Check if gateway is running with this token
@@ -1429,15 +1512,21 @@ cmd_setup() {
     echo "  Create one by messaging @BotFather: https://t.me/BotFather"
     echo "  Send /newbot, give it a name, and paste the token here."
     echo ""
-    echo -en "  ${CYAN}Manager Telegram bot token: ${NC}"
-    read -r manager_bot_token
+    prompt_with_retry "Manager Telegram bot token (or 'skip')" manager_bot_token "" true
 
-    if [[ -z "$manager_bot_token" ]]; then
-      log_fatal "Telegram bot token is required for the manager agent."
-    fi
-
-    if ! echo "$manager_bot_token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$'; then
-      log_fatal "Invalid token format. Expected: 123456789:ABCdef..."
+    if [[ "$manager_bot_token" == "skip" ]] || [[ -z "$manager_bot_token" ]]; then
+      log_warn "Skipping Telegram setup. You can configure it later with: openclaw channels add --channel telegram --token <token>"
+      manager_bot_token=""
+    elif ! echo "$manager_bot_token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$'; then
+      log_warn "Token format looks invalid. Expected: 123456789:ABCdef..."
+      if [[ -t 0 ]]; then
+        echo -en "${YELLOW}Use this token anyway? [y/N]: ${NC}"
+        read -r use_anyway
+        if [[ ! "$use_anyway" =~ ^[Yy]$ ]]; then
+          log_warn "Skipping Telegram setup."
+          manager_bot_token=""
+        fi
+      fi
     fi
   fi
 
@@ -1448,7 +1537,7 @@ cmd_setup() {
 
   # Check if OpenClaw is already fully set up
   local needs_onboard=true
-  if [[ -f ~/.openclaw/openclaw.json ]] && pgrep -f "openclaw.*gateway" &>/dev/null; then
+  if [[ -f "${oc_config_dir}/openclaw.json" ]] && pgrep -f "openclaw.*gateway" &>/dev/null; then
     log_ok "OpenClaw already configured and running"
     needs_onboard=false
   fi
@@ -1488,13 +1577,23 @@ cmd_setup() {
   fi
 
   # Configure tool profile for fleet management
-  openclaw config set tools.profile full &>/dev/null
+  local profile_flag=""
+  [[ -n "$oc_profile" ]] && profile_flag="--profile $oc_profile"
+  openclaw $profile_flag config set tools.profile full &>/dev/null || true
 
-  # Configure Telegram channel
-  openclaw config set channels.telegram.enabled true &>/dev/null
-  openclaw config set channels.telegram.botToken "$manager_bot_token" &>/dev/null
-  openclaw config set channels.telegram.dmPolicy pairing &>/dev/null
-  openclaw config set channels.telegram.streaming partial &>/dev/null
+  # Configure Telegram channel (only if token was provided)
+  if [[ -n "$manager_bot_token" ]]; then
+    local profile_flag=""
+    [[ -n "$oc_profile" ]] && profile_flag="--profile $oc_profile"
+    openclaw $profile_flag config set channels.telegram.enabled true &>/dev/null || true
+    openclaw $profile_flag config set channels.telegram.botToken "$manager_bot_token" &>/dev/null || true
+    openclaw $profile_flag config set channels.telegram.dmPolicy pairing &>/dev/null || true
+    openclaw $profile_flag config set channels.telegram.streaming partial &>/dev/null || true
+    # Enable telegram plugin
+    openclaw $profile_flag plugins enable telegram &>/dev/null || true
+  else
+    log_info "Telegram not configured. Add later with: fleet setup"
+  fi
 
   log_ok "Manager agent configured"
 
@@ -1503,7 +1602,11 @@ cmd_setup() {
   # --- Step 7: Write workspace files ---
   echo -e "${BOLD}Step 7: Workspace Files${NC}"
 
-  local ws=~/.openclaw/workspace
+  local ws="${oc_config_dir}/workspace"
+  if [[ -n "$oc_profile" ]]; then
+    # Also ensure the inner workspace exists for profile setups
+    mkdir -p "${oc_config_dir}/.openclaw/workspace" 2>/dev/null || true
+  fi
   mkdir -p "$ws/memory"
 
   # IDENTITY.md
@@ -1612,11 +1715,61 @@ HBEOF
 
   # Install fleet-manager skill
   local skill_src="${FLEET_DIR}/skills/fleet-manager/SKILL.md"
-  local skill_dst=~/.openclaw/skills/fleet-manager
+  local skill_dst="${oc_config_dir}/skills/fleet-manager"
   if [[ -f "$skill_src" ]]; then
     mkdir -p "$skill_dst"
     cp "$skill_src" "$skill_dst/SKILL.md"
     log_ok "Fleet-manager skill installed"
+  fi
+
+  echo ""
+
+  # --- Step 7b: AgentGuard Security ---
+  echo -e "${BOLD}Step 7b: AgentGuard Security${NC}"
+  echo ""
+  echo "  AgentGuard provides runtime security policies for your agents:"
+  echo "    - Block access to sensitive files"
+  echo "    - Monitor web requests"
+  echo "    - Require approval for destructive operations"
+  echo "    - Rate limit API calls"
+  echo "    - PII detection and redaction"
+  echo ""
+  echo -en "  ${CYAN}Enable AgentGuard? [Y/n]: ${NC}"
+  read -r enable_ag
+
+  if [[ ! "$enable_ag" =~ ^[Nn]$ ]]; then
+    # Initialize default policy
+    init_agentguard
+    log_ok "AgentGuard policy created"
+
+    echo ""
+    echo "  AgentGuard requires an API key from https://agentguard.tech"
+    echo -en "  ${CYAN}AgentGuard API key (or Enter to skip): ${NC}"
+    read -rs ag_api_key
+    echo ""
+
+    if [[ -n "$ag_api_key" ]]; then
+      # Store in .env.fleet
+      local fleet_env="${FLEET_DIR}/.env.fleet"
+      if [[ -f "$fleet_env" ]]; then
+        # Remove existing entry if present
+        grep -v "^AGENTGUARD_API_KEY=" "$fleet_env" > "${fleet_env}.tmp" 2>/dev/null || true
+        mv "${fleet_env}.tmp" "$fleet_env"
+      fi
+      echo "AGENTGUARD_API_KEY='${ag_api_key}'" >> "${fleet_env:-${FLEET_DIR}/.env.fleet}"
+      chmod 600 "${fleet_env:-${FLEET_DIR}/.env.fleet}"
+      export AGENTGUARD_API_KEY="$ag_api_key"
+      log_ok "AgentGuard API key saved"
+
+      # Try to register the manager
+      log_info "Registering manager agent with AgentGuard..."
+      register_agent "${manager_name}" || log_warn "AgentGuard registration failed (will retry on next start)"
+    else
+      log_info "AgentGuard policy created but no API key set."
+      log_info "Add later with: fleet agentguard enable"
+    fi
+  else
+    log_info "AgentGuard skipped. Enable later with: fleet agentguard enable"
   fi
 
   echo ""
@@ -1656,21 +1809,25 @@ ENVEOF
   # --- Step 9: Start/restart gateway ---
   echo -e "${BOLD}Step 9: Start Manager Agent${NC}"
 
+  local profile_flag=""
+  [[ -n "$oc_profile" ]] && profile_flag="--profile $oc_profile"
+
   if pgrep -f "openclaw.*gateway" &>/dev/null; then
     log_info "Restarting gateway to apply changes..."
-    openclaw gateway restart 2>&1 | tail -1
+    openclaw $profile_flag daemon restart 2>&1 | tail -1 || true
   else
     log_info "Starting gateway..."
-    openclaw gateway install 2>&1 | tail -1 || true
-    openclaw gateway start 2>&1 | tail -1 || true
+    openclaw $profile_flag daemon install 2>&1 | tail -1 || true
   fi
 
   # Wait for gateway to be ready
+  local gw_port
+  gw_port=$(jq -r '.gateway.port // 18789' "${oc_config_dir}/openclaw.json" 2>/dev/null || echo 18789)
   local tries=0
-  while ! curl -s http://127.0.0.1:18789/healthz &>/dev/null; do
+  while ! curl -s "http://127.0.0.1:${gw_port}/healthz" &>/dev/null; do
     tries=$((tries + 1))
     if [[ $tries -ge 15 ]]; then
-      log_warn "Gateway not responding yet. Check: openclaw health"
+      log_warn "Gateway not responding yet. Check: openclaw ${profile_flag} health"
       break
     fi
     sleep 2
