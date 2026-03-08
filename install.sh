@@ -156,10 +156,12 @@ FILES=(
   lib/secrets.sh
   lib/agentguard.sh
   lib/maintain.sh
+  lib/doctor.sh
+  skills/fleet-manager/SKILL.md
 )
 
 info "Installing to ${INSTALL_DIR}..."
-mkdir -p "${INSTALL_DIR}/lib"
+mkdir -p "${INSTALL_DIR}/lib" "${INSTALL_DIR}/skills/fleet-manager"
 
 # Detect if running from a local checkout (install.sh is next to fleet.sh)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"

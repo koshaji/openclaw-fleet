@@ -1601,6 +1601,15 @@ HBEOF
 
   log_ok "Workspace files written"
 
+  # Install fleet-manager skill
+  local skill_src="${FLEET_DIR}/skills/fleet-manager/SKILL.md"
+  local skill_dst=~/.openclaw/skills/fleet-manager
+  if [[ -f "$skill_src" ]]; then
+    mkdir -p "$skill_dst"
+    cp "$skill_src" "$skill_dst/SKILL.md"
+    log_ok "Fleet-manager skill installed"
+  fi
+
   echo ""
 
   # --- Step 8: Fleet config ---
