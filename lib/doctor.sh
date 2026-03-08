@@ -9,6 +9,7 @@ DOCTOR_ISSUES=0
 DOCTOR_FIXED=0
 DOCTOR_WARNINGS=0
 DOCTOR_CHECKS=0
+DOCTOR_HEAL=true
 
 # --- Reporting helpers ---
 
@@ -21,6 +22,11 @@ doctor_fix() {
   DOCTOR_CHECKS=$((DOCTOR_CHECKS + 1))
   DOCTOR_FIXED=$((DOCTOR_FIXED + 1))
   echo -e "  ${CYAN}⚡${NC} $* ${CYAN}(auto-fixed)${NC}"
+}
+
+# Returns 0 if healing is enabled, 1 if diagnose-only
+can_heal() {
+  [[ "$DOCTOR_HEAL" == "true" ]]
 }
 
 doctor_warn() {
@@ -111,15 +117,29 @@ doctor_check_fleet_config() {
   fi
   if [[ "$perms" == "600" ]]; then
     doctor_pass ".env.fleet permissions: 600"
-  else
+  elif can_heal; then
     chmod 600 "$fleet_env"
     doctor_fix ".env.fleet permissions: $perms -> 600"
+  else
+    doctor_fail ".env.fleet permissions: $perms (expected 600)"
   fi
 
   # Registry exists
   if [[ -f "$REGISTRY_FILE" ]]; then
     if jq empty "$REGISTRY_FILE" 2>/dev/null; then
       doctor_pass "registry.json valid"
+
+      # Remove gatewayToken from registry (secret should only be in .env files)
+      if jq -e '.agents | to_entries[] | select(.value.gatewayToken)' "$REGISTRY_FILE" &>/dev/null; then
+        if can_heal; then
+          local cleaned
+          cleaned=$(jq '.agents |= with_entries(.value |= del(.gatewayToken))' "$REGISTRY_FILE")
+          atomic_json_write "$REGISTRY_FILE" "$cleaned"
+          doctor_fix "Removed gatewayToken from registry (security)"
+        else
+          doctor_fail "registry.json contains gatewayToken secrets"
+        fi
+      fi
     else
       doctor_fail "registry.json is corrupt JSON"
     fi
@@ -153,15 +173,23 @@ doctor_check_fleet_config() {
       local lock_pid
       lock_pid=$(cat "$lock_pid_file" 2>/dev/null || echo "")
       if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
-        rm -rf "$lock_dir"
-        doctor_fix "Removed stale lock (PID $lock_pid dead)"
+        if can_heal; then
+          rm -rf "$lock_dir"
+          doctor_fix "Removed stale lock (PID $lock_pid dead)"
+        else
+          doctor_fail "Stale lock exists (PID $lock_pid dead)"
+        fi
       else
         doctor_warn "Lock held by PID $lock_pid (running)"
       fi
     else
       # Lock dir exists but no PID file — likely stale
-      rm -rf "$lock_dir"
-      doctor_fix "Removed stale lock (no PID file)"
+      if can_heal; then
+        rm -rf "$lock_dir"
+        doctor_fix "Removed stale lock (no PID file)"
+      else
+        doctor_fail "Stale lock exists (no PID file)"
+      fi
     fi
   fi
 }
@@ -185,7 +213,7 @@ doctor_check_manager() {
   # Gateway running
   if pgrep -f "openclaw.*gateway" &>/dev/null; then
     doctor_pass "Gateway process running"
-  else
+  elif can_heal; then
     # Try to start it
     if openclaw gateway start &>/dev/null 2>&1; then
       sleep 3
@@ -197,6 +225,8 @@ doctor_check_manager() {
     else
       doctor_fail "Gateway not running and could not start"
     fi
+  else
+    doctor_fail "Gateway not running"
   fi
 
   # Gateway healthz
@@ -205,8 +235,8 @@ doctor_check_manager() {
   if curl -sf --max-time 5 "http://127.0.0.1:${gw_port}/healthz" &>/dev/null; then
     doctor_pass "Gateway HTTP healthy (port $gw_port)"
   else
-    # Gateway process may be running but not responding — restart
-    if pgrep -f "openclaw.*gateway" &>/dev/null; then
+    if can_heal && pgrep -f "openclaw.*gateway" &>/dev/null; then
+      # Gateway process may be running but not responding — restart
       openclaw gateway restart &>/dev/null 2>&1 || true
       sleep 5
       if curl -sf --max-time 5 "http://127.0.0.1:${gw_port}/healthz" &>/dev/null; then
@@ -244,7 +274,7 @@ doctor_check_manager() {
       doctor_pass "Workspace: ${f}"
     else
       # Auto-create MEMORY.md if missing
-      if [[ "$f" == "MEMORY.md" ]]; then
+      if [[ "$f" == "MEMORY.md" ]] && can_heal; then
         local manager_name
         manager_name=$(get_fleet_manager_name 2>/dev/null || echo "fleet")
         cat > "${ws}/MEMORY.md" <<MEMEOF
@@ -266,9 +296,11 @@ MEMEOF
   tool_profile=$(jq -r '.tools.profile // "messaging"' ~/.openclaw/openclaw.json 2>/dev/null)
   if [[ "$tool_profile" == "full" ]]; then
     doctor_pass "Tool profile: full"
-  else
+  elif can_heal; then
     openclaw config set tools.profile full &>/dev/null 2>&1 || true
     doctor_fix "Tool profile was '$tool_profile' — set to 'full'"
+  else
+    doctor_fail "Tool profile is '$tool_profile' (expected 'full')"
   fi
 }
 
@@ -412,8 +444,12 @@ doctor_check_agents() {
         env_perms=$(stat -c %a "${agent_dir}/.env" 2>/dev/null)
       fi
       if [[ "$env_perms" != "600" ]]; then
-        chmod 600 "${agent_dir}/.env"
-        doctor_fix "  .env permissions: $env_perms -> 600"
+        if can_heal; then
+          chmod 600 "${agent_dir}/.env"
+          doctor_fix "  .env permissions: $env_perms -> 600"
+        else
+          doctor_fail "  .env permissions: $env_perms (expected 600)"
+        fi
       fi
     fi
 
@@ -444,26 +480,31 @@ doctor_check_agents() {
       if curl -sf --max-time 5 "http://127.0.0.1:${gw_port}/healthz" &>/dev/null; then
         doctor_pass "  Healthy (container running, HTTP ok)"
       else
-        # Container running but HTTP failing — restart
-        docker compose -f "${agent_dir}/docker-compose.yml" \
-          --env-file "${agent_dir}/.env" \
-          -p "openclaw-${name}" \
-          restart 2>/dev/null || true
+        if can_heal; then
+          # Container running but HTTP failing — restart
+          docker compose -f "${agent_dir}/docker-compose.yml" \
+            --env-file "${agent_dir}/.env" \
+            -p "openclaw-${name}" \
+            restart 2>/dev/null || true
 
-        # Wait and recheck
-        sleep 10
-        if curl -sf --max-time 5 "http://127.0.0.1:${gw_port}/healthz" &>/dev/null; then
-          doctor_fix "  Was unresponsive — restarted and now healthy"
-          registry_set_state "$name" "running" 2>/dev/null || true
+          # Wait and recheck
+          sleep 10
+          if curl -sf --max-time 5 "http://127.0.0.1:${gw_port}/healthz" &>/dev/null; then
+            doctor_fix "  Was unresponsive — restarted and now healthy"
+            registry_set_state "$name" "running" 2>/dev/null || true
+          else
+            doctor_fail "  Container running but HTTP unhealthy after restart"
+            registry_set_state "$name" "unhealthy" 2>/dev/null || true
+          fi
         else
-          doctor_fail "  Container running but HTTP unhealthy after restart"
-          registry_set_state "$name" "unhealthy" 2>/dev/null || true
+          doctor_fail "  Container running but HTTP unhealthy"
         fi
       fi
 
     elif [[ "$docker_state" == "exited" ]] || [[ "$docker_state" == "missing" ]]; then
-      # Agent should be running but isn't — start it
-      if start_agent "$name" 2>/dev/null; then
+      if ! can_heal; then
+        doctor_fail "  Container $docker_state (needs restart)"
+      elif start_agent "$name" 2>/dev/null; then
         # Wait for health
         local became_healthy=false
         for attempt in $(seq 1 6); do
@@ -492,15 +533,23 @@ doctor_check_agents() {
 
     # --- Registry sync ---
     if [[ "$docker_state" == "running" ]] && [[ "$reg_state" != "running" ]]; then
-      registry_set_state "$name" "running" 2>/dev/null || true
-      doctor_fix "  Registry state synced: $reg_state -> running"
+      if can_heal; then
+        registry_set_state "$name" "running" 2>/dev/null || true
+        doctor_fix "  Registry state synced: $reg_state -> running"
+      else
+        doctor_warn "  Registry out of sync: says $reg_state, container running"
+      fi
     elif [[ "$docker_state" != "running" ]] && [[ "$reg_state" == "running" ]]; then
       # Only update if we didn't already fix it above
       local current_state
       current_state=$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || echo "missing")
       if [[ "$current_state" != "running" ]]; then
-        registry_set_state "$name" "stopped" 2>/dev/null || true
-        doctor_fix "  Registry state synced: running -> stopped"
+        if can_heal; then
+          registry_set_state "$name" "stopped" 2>/dev/null || true
+          doctor_fix "  Registry state synced: running -> stopped"
+        else
+          doctor_warn "  Registry out of sync: says running, container $current_state"
+        fi
       fi
     fi
 
@@ -519,11 +568,15 @@ doctor_check_agents() {
         local reg_bot
         reg_bot=$(echo "$agent_info" | jq -r '.telegramBot // ""')
         if [[ -z "$reg_bot" ]] || [[ "$reg_bot" == "-" ]]; then
-          local updated
-          updated=$(jq --arg name "$name" --arg bot "@${bot_user}" \
-            '.agents[$name].telegramBot = $bot' "$REGISTRY_FILE")
-          atomic_json_write "$REGISTRY_FILE" "$updated" 2>/dev/null || true
-          doctor_fix "  Registry: saved bot name @${bot_user}"
+          if can_heal; then
+            local updated
+            updated=$(jq --arg name "$name" --arg bot "@${bot_user}" \
+              '.agents[$name].telegramBot = $bot' "$REGISTRY_FILE")
+            atomic_json_write "$REGISTRY_FILE" "$updated" 2>/dev/null || true
+            doctor_fix "  Registry: saved bot name @${bot_user}"
+          else
+            doctor_warn "  Registry: bot name not saved (diagnose-only mode)"
+          fi
         fi
       else
         doctor_warn "  Telegram: bot token invalid or API unreachable"
@@ -623,9 +676,11 @@ doctor_check_resources() {
   # Dangling images
   local dangling
   dangling=$(docker images -f "dangling=true" -q 2>/dev/null | wc -l | tr -d ' ')
-  if [[ "$dangling" -gt 5 ]]; then
+  if [[ "$dangling" -gt 5 ]] && can_heal; then
     docker image prune -f --filter "until=48h" &>/dev/null
     doctor_fix "Pruned $dangling dangling Docker images"
+  elif [[ "$dangling" -gt 5 ]]; then
+    doctor_warn "Dangling images: $dangling (run with heal to prune)"
   elif [[ "$dangling" -gt 0 ]]; then
     doctor_pass "Dangling images: $dangling (low, skipping prune)"
   else
@@ -656,12 +711,13 @@ doctor_check_resources() {
 
 doctor_run() {
   local heal="${1:-true}"
+  DOCTOR_HEAL="$heal"
 
   echo ""
   echo -e "${BOLD}Fleet Doctor${NC}"
   echo -e "${BOLD}$(printf '=%.0s' {1..40})${NC}"
 
-  if [[ "$heal" == "false" ]]; then
+  if [[ "$DOCTOR_HEAL" == "false" ]]; then
     echo -e "  Mode: ${YELLOW}diagnose only${NC} (no auto-fix)"
   else
     echo -e "  Mode: ${GREEN}diagnose + heal${NC}"

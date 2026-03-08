@@ -85,7 +85,7 @@ registry_add_agent() {
   local gateway_port="$2"
   local bridge_port="$3"
   local telegram_bot="${4:-}"
-  local gateway_token="$5"
+  # $5 (gateway_token) accepted for backwards compat but NOT stored in registry
 
   local updated
   updated=$(jq \
@@ -93,14 +93,12 @@ registry_add_agent() {
     --argjson gp "$gateway_port" \
     --argjson bp "$bridge_port" \
     --arg bot "$telegram_bot" \
-    --arg token "$gateway_token" \
     --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg state "running" \
     '.agents[$name] = {
       gatewayPort: $gp,
       bridgePort: $bp,
       telegramBot: $bot,
-      gatewayToken: $token,
       created: $created,
       state: $state
     }' "$REGISTRY_FILE")

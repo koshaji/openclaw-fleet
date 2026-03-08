@@ -358,14 +358,6 @@ cmd_status() {
   detect_platform
   init_registry
 
-  # Reconcile is read-heavy but does write — only if we can get the lock
-  if mkdir "${FLEET_DIR}/agents/.fleet.lock" 2>/dev/null; then
-    echo $$ > "${FLEET_DIR}/agents/.fleet.lock/pid" 2>/dev/null || true
-    LOCK_DIR="${FLEET_DIR}/agents/.fleet.lock"
-    trap 'release_lock' EXIT INT TERM
-    reconcile_registry
-  fi
-
   if [[ "$json" == "true" ]]; then
     print_status_json
   else
@@ -878,14 +870,18 @@ cmd_backup() {
 
     # Also backup fleet-level files
     local fleet_backup="${backup_dir}/fleet_${timestamp}.tar.gz"
-    tar -czf "$fleet_backup" \
+    if tar -czf "$fleet_backup" \
       -C "$FLEET_DIR" \
       .env.fleet \
       agents/registry.json \
       agents/providers.json \
-      2>/dev/null || true
-    chmod 600 "$fleet_backup"
-    log_ok "Fleet config backed up to $fleet_backup"
+      2>/dev/null; then
+      chmod 600 "$fleet_backup"
+      log_ok "Fleet config backed up to $fleet_backup"
+    else
+      rm -f "$fleet_backup"
+      log_warn "Fleet config backup failed"
+    fi
   else
     agents=("$target")
   fi
@@ -900,16 +896,21 @@ cmd_backup() {
     local backup_file="${backup_dir}/${name}_${timestamp}.tar.gz"
 
     # Backup config only (not workspace, as it can be huge)
-    tar -czf "$backup_file" \
+    if tar -czf "$backup_file" \
       -C "${FLEET_DIR}/agents" \
       "${name}/config" \
       "${name}/.env" \
       "${name}/docker-compose.yml" \
-      2>/dev/null
-    chmod 600 "$backup_file"
-
-    log_ok "Agent '$name' backed up to $backup_file"
+      2>/dev/null; then
+      chmod 600 "$backup_file"
+      log_ok "Agent '$name' backed up to $backup_file"
+    else
+      rm -f "$backup_file"
+      log_warn "Backup failed for agent '$name'"
+    fi
   done
+
+  log_info "Note: Workspace data is not included in backups (agents regenerate it on start)."
 }
 
 cmd_restore() {
@@ -1024,7 +1025,12 @@ cmd_watchdog() {
 
   case "$action" in
     install)
-      local cron_cmd="*/5 * * * * ${FLEET_DIR}/fleet.sh watchdog run >> ${FLEET_DIR}/agents/watchdog-cron.log 2>&1"
+      # Use flock if available (Linux), otherwise the fleet's own acquire_lock handles overlap
+      local flock_prefix=""
+      if command -v flock &>/dev/null; then
+        flock_prefix="flock -n ${FLEET_DIR}/agents/.watchdog.flock "
+      fi
+      local cron_cmd="*/5 * * * * ${flock_prefix}${FLEET_DIR}/fleet.sh watchdog run >> ${FLEET_DIR}/agents/watchdog-cron.log 2>&1"
       ( { crontab -l 2>/dev/null | grep -v "fleet.sh watchdog" || true; } ; echo "$cron_cmd" ) | crontab -
       log_ok "Watchdog cron job installed (every 5 minutes)"
       ;;
@@ -1087,7 +1093,10 @@ cmd_providers() {
 
   case "$action" in
     add)
-      if [[ $# -ge 3 ]]; then
+      if [[ $# -ge 2 ]] && [[ $# -lt 3 ]] && [[ -n "${FLEET_API_KEY:-}" ]]; then
+        # API key from env var: FLEET_API_KEY=xxx fleet providers add <name> <type>
+        add_subscription "$1" "$2" "$FLEET_API_KEY"
+      elif [[ $# -ge 3 ]]; then
         # Non-interactive: providers add <name> <type> <api_key> [label] [base_url]
         add_subscription "$@"
       else
