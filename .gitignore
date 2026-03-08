@@ -1,0 +1,6 @@
+agents/
+.env.fleet
+*.secret
+*.bak
+*.tmp
+.DS_Store
