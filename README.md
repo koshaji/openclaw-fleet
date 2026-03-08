@@ -44,18 +44,22 @@ git clone https://github.com/koshaji/openclaw-fleet && cd openclaw-fleet
 ## Quick Start
 
 ```bash
-# 1. Check how many agents your machine can handle
-fleet capacity
+# Full setup: installs OpenClaw, configures manager agent, connects Telegram
+fleet setup
 
-# 2. Create your first agent (will prompt for API key and Telegram token)
+# Or skip the manager and just create container agents:
 fleet create 1
-
-# 3. Check status
-fleet status
-
-# 4. Pair your Telegram account (message the bot, get a code)
-fleet pair <AGENT_NAME> <CODE_FROM_TELEGRAM>
 ```
+
+`fleet setup` walks you through everything:
+1. Installs Docker, jq, Node.js, OpenClaw (if missing)
+2. Configures the manager agent (runs on bare metal, manages the fleet)
+3. Sets up your AI provider (API key)
+4. Connects a Telegram bot for the manager
+5. Writes workspace files so the manager knows it's a fleet commander
+6. Starts the gateway and shows capacity
+
+After setup, message your manager bot on Telegram to control everything.
 
 ## Commands
 

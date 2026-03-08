@@ -1206,6 +1206,432 @@ cmd_agentguard() {
   esac
 }
 
+cmd_setup() {
+  echo ""
+  echo -e "${BOLD}OpenClaw Fleet — Full Setup${NC}"
+  echo -e "This will set up a manager agent on this machine and prepare the fleet."
+  echo ""
+
+  detect_platform
+
+  # --- Step 1: Dependencies ---
+  echo -e "${BOLD}Step 1: Dependencies${NC}"
+
+  # Docker
+  if ! command -v docker &>/dev/null; then
+    log_warn "Docker not found."
+    if [[ "$PLATFORM" == "darwin" ]] && command -v brew &>/dev/null; then
+      if confirm "Install Docker Desktop via Homebrew?"; then
+        brew install --cask docker
+        echo ""
+        log_info "Open Docker Desktop to finish setup, then re-run this command."
+        return 0
+      fi
+    fi
+    log_fatal "Docker is required. Install it from https://docs.docker.com/get-docker/"
+  fi
+  if ! docker info &>/dev/null 2>&1; then
+    log_fatal "Docker is installed but not running. Start Docker Desktop first."
+  fi
+  log_ok "Docker"
+
+  # jq
+  if ! command -v jq &>/dev/null; then
+    if [[ "$PLATFORM" == "darwin" ]] && command -v brew &>/dev/null; then
+      if confirm "Install jq via Homebrew?"; then
+        brew install jq
+      else
+        log_fatal "jq is required. Install with: brew install jq"
+      fi
+    else
+      log_fatal "jq is required. Install with: apt-get install jq"
+    fi
+  fi
+  log_ok "jq"
+
+  # Node.js (needed for OpenClaw)
+  if ! command -v node &>/dev/null; then
+    if [[ "$PLATFORM" == "darwin" ]] && command -v brew &>/dev/null; then
+      if confirm "Install Node.js via Homebrew?"; then
+        brew install node
+      else
+        log_fatal "Node.js is required for OpenClaw. Install with: brew install node"
+      fi
+    else
+      log_fatal "Node.js is required for OpenClaw. Install from: https://nodejs.org"
+    fi
+  fi
+  log_ok "Node.js $(node --version)"
+
+  echo ""
+
+  # --- Step 2: OpenClaw CLI ---
+  echo -e "${BOLD}Step 2: OpenClaw CLI${NC}"
+
+  if command -v openclaw &>/dev/null; then
+    local oc_version
+    oc_version=$(openclaw --version 2>/dev/null || echo "unknown")
+    log_ok "OpenClaw ${oc_version} already installed"
+  else
+    log_info "Installing OpenClaw CLI..."
+    if ! npm install -g openclaw 2>&1; then
+      log_fatal "Failed to install OpenClaw. Try: sudo npm install -g openclaw"
+    fi
+    log_ok "OpenClaw installed: $(openclaw --version 2>/dev/null)"
+  fi
+
+  echo ""
+
+  # --- Step 3: Manager agent name ---
+  echo -e "${BOLD}Step 3: Manager Agent${NC}"
+  echo ""
+  echo "  The manager agent runs directly on this machine (not in Docker)."
+  echo "  It manages the fleet and is your main point of contact via Telegram."
+  echo ""
+
+  local manager_name=""
+  local hostname_short
+  hostname_short=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "fleet")
+
+  echo -en "  ${CYAN}Manager name [${hostname_short}]: ${NC}"
+  read -r manager_name
+  manager_name="${manager_name:-$hostname_short}"
+
+  # Validate
+  local bad_chars='[$`"'"'"'\\;|&!(){}]'
+  if [[ "$manager_name" =~ $bad_chars ]]; then
+    log_fatal "Name contains invalid characters"
+  fi
+
+  echo ""
+
+  # --- Step 4: API Provider ---
+  echo -e "${BOLD}Step 4: AI Provider${NC}"
+  echo ""
+  echo "  The manager agent and fleet agents share API providers."
+  echo ""
+
+  local has_provider=false
+  if [[ -f "${FLEET_DIR}/agents/providers.json" ]]; then
+    local pcount
+    pcount=$(jq '.subscriptions | length' "${FLEET_DIR}/agents/providers.json" 2>/dev/null || echo 0)
+    if [[ "$pcount" -gt 0 ]]; then
+      has_provider=true
+      log_ok "Provider already configured"
+      jq -r '.subscriptions | to_entries[] | "  - \(.key) (\(.value.type))"' \
+        "${FLEET_DIR}/agents/providers.json" 2>/dev/null
+    fi
+  fi
+
+  if [[ "$has_provider" == false ]]; then
+    init_providers
+    interactive_add_subscription || log_fatal "At least one AI provider is required."
+    has_provider=true
+  fi
+
+  echo ""
+
+  # --- Step 5: Telegram bot for manager ---
+  echo -e "${BOLD}Step 5: Telegram Bot (Manager)${NC}"
+  echo ""
+
+  local manager_bot_token=""
+  local existing_bot_token=""
+  existing_bot_token=$(jq -r '.channels.telegram.botToken // empty' \
+    ~/.openclaw/openclaw.json 2>/dev/null)
+
+  if [[ -n "$existing_bot_token" ]]; then
+    # Check if gateway is running with this token
+    if pgrep -f "openclaw.*gateway" &>/dev/null; then
+      local bot_name
+      bot_name=$(openclaw health 2>&1 | grep -o '@[^ )]*' | head -1 || echo "")
+      log_ok "Manager already has a Telegram bot: ${bot_name:-configured}"
+      manager_bot_token="$existing_bot_token"
+    else
+      manager_bot_token="$existing_bot_token"
+      log_ok "Telegram bot token found in config"
+    fi
+  fi
+
+  if [[ -z "$manager_bot_token" ]]; then
+    echo "  The manager agent needs its own Telegram bot."
+    echo "  Create one by messaging @BotFather: https://t.me/BotFather"
+    echo "  Send /newbot, give it a name, and paste the token here."
+    echo ""
+    echo -en "  ${CYAN}Manager Telegram bot token: ${NC}"
+    read -r manager_bot_token
+
+    if [[ -z "$manager_bot_token" ]]; then
+      log_fatal "Telegram bot token is required for the manager agent."
+    fi
+
+    if ! echo "$manager_bot_token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$'; then
+      log_fatal "Invalid token format. Expected: 123456789:ABCdef..."
+    fi
+  fi
+
+  echo ""
+
+  # --- Step 6: Configure OpenClaw ---
+  echo -e "${BOLD}Step 6: Configure Manager Agent${NC}"
+
+  # Check if OpenClaw is already fully set up
+  local needs_onboard=true
+  if [[ -f ~/.openclaw/openclaw.json ]] && pgrep -f "openclaw.*gateway" &>/dev/null; then
+    log_ok "OpenClaw already configured and running"
+    needs_onboard=false
+  fi
+
+  if [[ "$needs_onboard" == true ]]; then
+    log_info "Running OpenClaw setup..."
+
+    # Get the API key from the first provider subscription
+    local provider_type
+    provider_type=$(jq -r '.subscriptions | to_entries[0].value.type' \
+      "${FLEET_DIR}/agents/providers.json" 2>/dev/null)
+    local provider_key
+    provider_key=$(jq -r '.subscriptions | to_entries[0].value.apiKey' \
+      "${FLEET_DIR}/agents/providers.json" 2>/dev/null)
+
+    # Resolve op:// references
+    local resolved_key
+    resolved_key=$(resolve_secret "$provider_key" 2>/dev/null) || resolved_key="$provider_key"
+
+    # Map fleet provider type to openclaw auth choice
+    local auth_choice="custom"
+    case "$provider_type" in
+      anthropic) auth_choice="anthropic-api-key" ;;
+      openai)    auth_choice="openai-api-key" ;;
+      google)    auth_choice="google-api-key" ;;
+    esac
+
+    # Run non-interactive setup
+    if [[ "$auth_choice" != "custom" ]]; then
+      openclaw onboard --non-interactive --accept-risk \
+        --auth-choice "$auth_choice" \
+        --install-daemon \
+        --skip-channels --skip-skills 2>&1 || true
+    else
+      openclaw setup --non-interactive --mode local 2>&1 || true
+    fi
+  fi
+
+  # Configure tool profile for fleet management
+  openclaw config set tools.profile full &>/dev/null
+
+  # Configure Telegram channel
+  openclaw config set channels.telegram.enabled true &>/dev/null
+  openclaw config set channels.telegram.botToken "$manager_bot_token" &>/dev/null
+  openclaw config set channels.telegram.dmPolicy pairing &>/dev/null
+  openclaw config set channels.telegram.streaming partial &>/dev/null
+
+  log_ok "Manager agent configured"
+
+  echo ""
+
+  # --- Step 7: Write workspace files ---
+  echo -e "${BOLD}Step 7: Workspace Files${NC}"
+
+  local ws=~/.openclaw/workspace
+  mkdir -p "$ws/memory"
+
+  # IDENTITY.md
+  cat > "$ws/IDENTITY.md" <<IDEOF
+# IDENTITY.md - Who Am I?
+
+- **Name:** ${manager_name}
+- **Creature:** Fleet commander — an AI agent running on bare metal that manages a fleet of containerized AI agents
+- **Vibe:** Efficient, direct, security-conscious. Keeps things running.
+- **Emoji:** 🦞
+IDEOF
+
+  # USER.md (minimal — agent will fill in during first chat)
+  if [[ ! -s "$ws/USER.md" ]] || grep -q "^- \*\*Name:\*\*$" "$ws/USER.md" 2>/dev/null; then
+    cat > "$ws/USER.md" <<USREOF
+# USER.md - About Your Human
+
+- **Name:** (ask during first chat)
+- **What to call them:** (ask during first chat)
+- **Notes:** Owner and operator of the OpenClaw Fleet.
+
+## Context
+
+Runs the OpenClaw Fleet — multiple AI agents as Docker containers managed by ${manager_name}.
+USREOF
+  fi
+
+  # TOOLS.md
+  cat > "$ws/TOOLS.md" <<'TOOLSEOF'
+# TOOLS.md - Fleet Commander Reference
+
+## Fleet Manager
+
+You are the fleet commander. You manage Docker-based OpenClaw agents using the fleet CLI.
+
+### Fleet CLI
+```
+~/openclaw-fleet/fleet.sh
+```
+
+### Quick Reference
+
+```bash
+# Status & monitoring
+fleet status                    # Show all agents, health, ports
+fleet capacity                  # Max agents this machine supports
+
+# Agent lifecycle
+fleet create <N>                # Create N agents (interactive)
+fleet destroy <name|--all>      # Remove agent(s)
+fleet restart <name|--all>      # Restart with stagger
+fleet stop / start <name>       # Stop or start
+
+# Operations
+fleet update                    # Rolling update all agents
+fleet reconfigure               # Re-propagate config
+fleet logs <name> --follow      # Tail agent logs
+fleet shell <name>              # Shell into container
+
+# Provider & models
+fleet providers list            # Show API providers
+fleet providers add             # Add new provider
+fleet models assign <agent> <provider/model>
+
+# Maintenance
+fleet maintain run              # Health + backup + cleanup
+fleet backup --all              # Backup all configs
+fleet pair <name> <code>        # Approve Telegram pairing
+```
+
+### Architecture
+```
+You (fleet commander, bare metal) — manages everything
+  └── Container agents (Docker) — do work for users
+```
+
+### Security
+- All containers: read-only rootfs, non-root, cap_drop ALL
+- Config mounted read-only, ports on 127.0.0.1 only
+- API keys in providers.json (chmod 600)
+```
+TOOLSEOF
+
+  # HEARTBEAT.md
+  cat > "$ws/HEARTBEAT.md" <<'HBEOF'
+# HEARTBEAT.md - Periodic Checks
+
+## Fleet Health (every heartbeat)
+Run `~/openclaw-fleet/fleet.sh status` and check if any agents are unhealthy or stopped.
+If unhealthy, try `~/openclaw-fleet/fleet.sh restart <name>`.
+Only notify the user if an agent stays unhealthy after restart.
+
+## Routine (rotate, 2-4x daily)
+- Fleet status check
+- Docker disk usage: `docker system df` (once a day)
+
+## Stay quiet when
+- All agents healthy, nothing unusual → HEARTBEAT_OK
+- Late night (23:00-08:00) unless an agent is down
+HBEOF
+
+  # Remove bootstrap file if it exists (agent is pre-configured)
+  rm -f "$ws/BOOTSTRAP.md" 2>/dev/null
+
+  log_ok "Workspace files written"
+
+  echo ""
+
+  # --- Step 8: Fleet config ---
+  echo -e "${BOLD}Step 8: Fleet Config${NC}"
+
+  local fleet_env="${FLEET_DIR}/.env.fleet"
+  if [[ ! -f "$fleet_env" ]]; then
+    local base_port="${FLEET_BASE_PORT:-19000}"
+
+    cat > "$fleet_env" <<ENVEOF
+FLEET_MANAGER_NAME='${manager_name}'
+FLEET_BASE_PORT='${base_port}'
+OPENCLAW_IMAGE_TAG='latest'
+OPENCLAW_IMAGE='ghcr.io/openclaw/openclaw'
+FLEET_CPUS='1.5'
+FLEET_MEMORY='2048M'
+ENVEOF
+
+    chmod 600 "$fleet_env"
+    log_ok "Fleet config created"
+  else
+    # Update manager name in existing config
+    if grep -q "^FLEET_MANAGER_NAME=" "$fleet_env"; then
+      grep -v "^FLEET_MANAGER_NAME=" "$fleet_env" > "${fleet_env}.tmp"
+      echo "FLEET_MANAGER_NAME='${manager_name}'" >> "${fleet_env}.tmp"
+      mv "${fleet_env}.tmp" "$fleet_env"
+      chmod 600 "$fleet_env"
+    fi
+    log_ok "Fleet config exists (updated manager name)"
+  fi
+  source "$fleet_env"
+
+  echo ""
+
+  # --- Step 9: Start/restart gateway ---
+  echo -e "${BOLD}Step 9: Start Manager Agent${NC}"
+
+  if pgrep -f "openclaw.*gateway" &>/dev/null; then
+    log_info "Restarting gateway to apply changes..."
+    openclaw gateway restart 2>&1 | tail -1
+  else
+    log_info "Starting gateway..."
+    openclaw gateway install 2>&1 | tail -1 || true
+    openclaw gateway start 2>&1 | tail -1 || true
+  fi
+
+  # Wait for gateway to be ready
+  local tries=0
+  while ! curl -s http://127.0.0.1:18789/healthz &>/dev/null; do
+    tries=$((tries + 1))
+    if [[ $tries -ge 15 ]]; then
+      log_warn "Gateway not responding yet. Check: openclaw health"
+      break
+    fi
+    sleep 2
+  done
+
+  if [[ $tries -lt 15 ]]; then
+    log_ok "Manager agent running"
+
+    # Show bot info
+    local bot_info
+    bot_info=$(openclaw health 2>&1 | grep "Telegram:" || true)
+    if [[ -n "$bot_info" ]]; then
+      log_ok "$bot_info"
+    fi
+  fi
+
+  echo ""
+
+  # --- Step 10: Show capacity and next steps ---
+  echo -e "${BOLD}Step 10: Ready!${NC}"
+  echo ""
+  init_registry
+  show_capacity
+
+  echo -e "${BOLD}Next Steps${NC}"
+  echo ""
+  echo "  1. Message your manager bot on Telegram"
+  echo "     It will ask for a pairing code — run:"
+  echo -e "     ${CYAN}openclaw pairing list${NC}"
+  echo ""
+  echo "  2. Create your first fleet agents:"
+  echo -e "     ${CYAN}./fleet.sh create 1${NC}"
+  echo ""
+  echo "  3. Install daily maintenance:"
+  echo -e "     ${CYAN}./fleet.sh maintain install${NC}"
+  echo ""
+  echo "  4. Add the fleet alias to your shell:"
+  echo -e "     ${CYAN}echo \"alias fleet='${FLEET_DIR}/fleet.sh'\" >> ~/.zshrc${NC}"
+  echo ""
+}
+
 cmd_help() {
   local manager
   manager=$(get_fleet_manager_name)
@@ -1214,6 +1640,9 @@ OpenClaw Fleet Manager (managed by: ${manager})
 
 Usage:
   fleet.sh <command> [options]
+
+Getting Started:
+  setup               Full setup: install OpenClaw, configure manager agent, prepare fleet
 
 Agent Lifecycle:
   create <N>          Create N new agents
@@ -1295,6 +1724,7 @@ main() {
     models)       source_fleet_env; cmd_models "$@" ;;
     secrets)      cmd_secrets "$@" ;;
     agentguard)   source_fleet_env; cmd_agentguard "$@" ;;
+    setup)        cmd_setup ;;
     help|--help|-h) cmd_help ;;
     *)            log_error "Unknown command: $command"; cmd_help; exit 1 ;;
   esac
