@@ -153,17 +153,44 @@ FILES=(
 info "Installing to ${INSTALL_DIR}..."
 mkdir -p "${INSTALL_DIR}/lib"
 
+# Detect if running from a local checkout (install.sh is next to fleet.sh)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+LOCAL_INSTALL=false
+if [[ -f "${SCRIPT_DIR}/fleet.sh" ]] && [[ -d "${SCRIPT_DIR}/lib" ]]; then
+  LOCAL_INSTALL=true
+  info "Detected local checkout at ${SCRIPT_DIR}"
+fi
+
 DOWNLOAD_FAILED=0
 for file in "${FILES[@]}"; do
-  if curl -fsSL "${REPO_URL}/${file}" -o "${INSTALL_DIR}/${file}"; then
-    # Verify non-empty
-    if [[ ! -s "${INSTALL_DIR}/${file}" ]]; then
-      warn "Downloaded empty file: $file"
+  if [[ "$LOCAL_INSTALL" == true ]]; then
+    # Copy from local checkout
+    if [[ -f "${SCRIPT_DIR}/${file}" ]]; then
+      cp "${SCRIPT_DIR}/${file}" "${INSTALL_DIR}/${file}"
+    else
+      warn "Missing local file: $file"
       DOWNLOAD_FAILED=1
     fi
   else
-    warn "Failed to download: $file"
-    DOWNLOAD_FAILED=1
+    # Download from GitHub (requires public repo or gh auth)
+    if curl -fsSL "${REPO_URL}/${file}" -o "${INSTALL_DIR}/${file}" 2>/dev/null; then
+      if [[ ! -s "${INSTALL_DIR}/${file}" ]]; then
+        warn "Downloaded empty file: $file"
+        DOWNLOAD_FAILED=1
+      fi
+    elif command -v gh &>/dev/null; then
+      # Fallback: use gh CLI for private repos
+      if gh api "repos/koshaji/openclaw-fleet/contents/${file}" -q '.content' 2>/dev/null \
+         | base64 -d > "${INSTALL_DIR}/${file}" 2>/dev/null && [[ -s "${INSTALL_DIR}/${file}" ]]; then
+        true
+      else
+        warn "Failed to download: $file"
+        DOWNLOAD_FAILED=1
+      fi
+    else
+      warn "Failed to download: $file (repo may be private — install gh CLI or make repo public)"
+      DOWNLOAD_FAILED=1
+    fi
   fi
 done
 
