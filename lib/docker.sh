@@ -18,6 +18,26 @@ pull_image() {
     log_error "Failed to pull $full"
     return 1
   fi
+
+  # Verify image digest if pinned
+  local expected_digest="${OPENCLAW_IMAGE_DIGEST:-}"
+  if [[ -n "$expected_digest" ]]; then
+    local actual_digest
+    actual_digest=$(docker image inspect "$full" --format '{{index .RepoDigests 0}}' 2>/dev/null | grep -o 'sha256:[a-f0-9]*' || true)
+    if [[ -z "$actual_digest" ]]; then
+      log_warn "Could not retrieve image digest for verification"
+    elif [[ "$actual_digest" != "$expected_digest" ]]; then
+      log_error "Image digest mismatch!"
+      log_error "  Expected: $expected_digest"
+      log_error "  Got:      $actual_digest"
+      log_error "Rolling back to previous image..."
+      rollback_image
+      return 1
+    else
+      log_ok "Image digest verified: ${actual_digest:0:19}..."
+    fi
+  fi
+
   log_ok "Image pulled: $full"
 }
 

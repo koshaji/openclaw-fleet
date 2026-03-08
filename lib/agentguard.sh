@@ -79,8 +79,10 @@ register_agent() {
   fi
 
   local agent_key
+  local resolved_key
+  resolved_key=$(resolve_secret "${AGENTGUARD_API_KEY}") || return 1
   agent_key=$(curl -sf -X POST "${AGENTGUARD_API}/api/v1/agents" \
-    -H "X-API-Key: ${AGENTGUARD_API_KEY}" \
+    -H @<(echo "X-API-Key: ${resolved_key}") \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg n "$name" '{name: $n, tenant: "openclaw-fleet"}')" \
     | jq -r '.agentKey // empty' 2>/dev/null)
@@ -111,8 +113,10 @@ deregister_agent() {
     "${FLEET_DIR}/agents/registry.json" 2>/dev/null)
 
   if [[ -n "$agent_key" ]]; then
+    local resolved_key
+    resolved_key=$(resolve_secret "${AGENTGUARD_API_KEY}") || return 1
     curl -sf -X DELETE "${AGENTGUARD_API}/api/v1/agents/${agent_key}" \
-      -H "X-API-Key: ${AGENTGUARD_API_KEY}" &>/dev/null || true
+      -H @<(echo "X-API-Key: ${resolved_key}") &>/dev/null || true
     log_info "Deregistered agent '$name' from AgentGuard"
   fi
 }
@@ -138,8 +142,10 @@ kill_agent() {
 
   log_warn "Activating kill switch for agent '$name'..."
 
+  local resolved_key
+  resolved_key=$(resolve_secret "${AGENTGUARD_API_KEY}") || return 1
   curl -sf -X POST "${AGENTGUARD_API}/api/v1/agents/${agent_key}/kill" \
-    -H "X-API-Key: ${AGENTGUARD_API_KEY}" \
+    -H @<(echo "X-API-Key: ${resolved_key}") \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg r "$reason" '{reason: $r}')" &>/dev/null
 
@@ -169,8 +175,10 @@ agent_security_status() {
   fi
 
   local status
+  local resolved_key
+  resolved_key=$(resolve_secret "${AGENTGUARD_API_KEY}") || return 0
   status=$(curl -sf "${AGENTGUARD_API}/api/v1/agents/${agent_key}/status" \
-    -H "X-API-Key: ${AGENTGUARD_API_KEY}" \
+    -H @<(echo "X-API-Key: ${resolved_key}") \
     | jq -r '.status // "unknown"' 2>/dev/null)
 
   echo "${status:-unknown}"
@@ -185,7 +193,6 @@ agentguard_env_vars() {
   fi
 
   cat <<ENV
-AGENTGUARD_API_KEY=${AGENTGUARD_API_KEY}
 AGENTGUARD_AGENT_KEY=${agent_key}
 AGENTGUARD_API_URL=${AGENTGUARD_API}
 AGENTGUARD_POLICY_MODE=${AGENTGUARD_POLICY_MODE:-monitor}

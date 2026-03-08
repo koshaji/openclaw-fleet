@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+# Secure default: new files are owner-only (rw-------)
+umask 077
+
 # Colors (disabled with --no-color or non-tty)
 if [[ -t 1 ]] && [[ "${NO_COLOR:-}" != "1" ]]; then
   RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -88,8 +91,9 @@ atomic_json_write() {
     cp "$target" "$backup"
   fi
 
-  # Atomic write
+  # Atomic write (600 permissions enforced before mv)
   echo "$content" > "$tmp"
+  chmod 600 "$tmp"
   mv "$tmp" "$target"
 }
 

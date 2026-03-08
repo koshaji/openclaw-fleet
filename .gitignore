@@ -3,5 +3,7 @@ agents/
 *.secret
 *.bak
 *.tmp
+*.log
 .DS_Store
 backups/
+agentguard.yaml
