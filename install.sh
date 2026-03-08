@@ -51,6 +51,14 @@ done
 
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_DIR}"
 
+# Validate install directory (reject shell metacharacters and relative paths)
+if [[ "$INSTALL_DIR" != /* ]]; then
+  fail "Install directory must be an absolute path: $INSTALL_DIR"
+fi
+if [[ "$INSTALL_DIR" =~ [\;\|\&\$\`\!] ]]; then
+  fail "Install directory contains invalid characters: $INSTALL_DIR"
+fi
+
 echo ""
 echo -e "${BOLD}OpenClaw Fleet Manager — Installer${NC}"
 echo ""

@@ -72,6 +72,9 @@ start_agent() {
 
   # Ensure workspace is writable by container user (uid 1000)
   # Config dir is mounted read-only so no chown needed there
+  if [[ "${PLATFORM:-}" == "linux" ]]; then
+    chown -R 1000:1000 "${agent_dir}/workspace" 2>/dev/null || true
+  fi
   chmod -R u+rw "${agent_dir}/workspace" 2>/dev/null || true
 
   docker compose -f "${agent_dir}/docker-compose.yml" \
@@ -306,11 +309,7 @@ check_resources() {
 check_disk_space() {
   local min_gb="${1:-5}"
   local available_kb
-  if [[ "$PLATFORM" == "darwin" ]]; then
-    available_kb=$(df -k "${FLEET_DIR}" | tail -1 | awk '{print $4}')
-  else
-    available_kb=$(df -k "${FLEET_DIR}" | tail -1 | awk '{print $4}')
-  fi
+  available_kb=$(df -k "${FLEET_DIR}" | tail -1 | awk '{print $4}')
   local available_gb=$((available_kb / 1024 / 1024))
 
   if [[ $available_gb -lt $min_gb ]]; then

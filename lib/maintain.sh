@@ -158,13 +158,18 @@ maintain_backup() {
 
   # Fleet-level backup
   local fleet_backup="${backup_dir}/fleet_${timestamp}.tar.gz"
-  tar -czf "$fleet_backup" \
+  if tar -czf "$fleet_backup" \
     -C "$FLEET_DIR" \
     .env.fleet \
     agents/registry.json \
     agents/providers.json \
-    2>/dev/null || true
-  chmod 600 "$fleet_backup"
+    2>/dev/null; then
+    chmod 600 "$fleet_backup"
+    maintain_log "OK" "Fleet-level backup created"
+  else
+    maintain_log "ERROR" "Fleet-level backup failed"
+    rm -f "$fleet_backup"
+  fi
 
   # Per-agent backup
   local backed_up=0
@@ -172,18 +177,22 @@ maintain_backup() {
     local agent_dir="${FLEET_DIR}/agents/${name}"
     if [[ -d "$agent_dir" ]]; then
       local agent_backup="${backup_dir}/${name}_${timestamp}.tar.gz"
-      tar -czf "$agent_backup" \
+      if tar -czf "$agent_backup" \
         -C "${FLEET_DIR}/agents" \
         "${name}/config" \
         "${name}/.env" \
         "${name}/docker-compose.yml" \
-        2>/dev/null || true
-      chmod 600 "$agent_backup"
-      backed_up=$((backed_up + 1))
+        2>/dev/null; then
+        chmod 600 "$agent_backup"
+        backed_up=$((backed_up + 1))
+      else
+        maintain_log "ERROR" "Backup failed for agent '$name'"
+        rm -f "$agent_backup"
+      fi
     fi
   done
 
-  maintain_log "OK" "Backed up fleet config + $backed_up agent(s)"
+  maintain_log "OK" "Backed up $backed_up agent(s)"
 }
 
 # Phase 5: Security checks
@@ -211,8 +220,10 @@ maintain_security() {
 
   # Check AgentGuard connectivity
   if agentguard_enabled; then
-    if curl -sf --max-time 10 "${AGENTGUARD_API}/api/v1/health" \
-        -H "X-API-Key: ${AGENTGUARD_API_KEY}" &>/dev/null; then
+    local resolved_key
+    resolved_key=$(resolve_secret "${AGENTGUARD_API_KEY:-}" 2>/dev/null || echo "")
+    if [[ -n "$resolved_key" ]] && curl -sf --max-time 10 "${AGENTGUARD_API}/api/v1/health" \
+        -H @<(echo "X-API-Key: ${resolved_key}") &>/dev/null; then
       maintain_log "OK" "AgentGuard API reachable"
     else
       maintain_log "WARN" "AgentGuard API unreachable"

@@ -206,7 +206,7 @@ watchdog_check() {
     if [[ "$health" == "unhealthy" ]] || [[ "$health" == "stopped" ]]; then
       # Count recent unhealthy checks
       local recent_failures
-      recent_failures=$(grep "$name" "$log_file" 2>/dev/null | tail -"$max_unhealthy" | grep -c -E "unhealthy|stopped" || echo 0)
+      recent_failures=$(grep -w "$name" "$log_file" 2>/dev/null | tail -"$max_unhealthy" | grep -c -E "unhealthy|stopped" || echo 0)
 
       if [[ $recent_failures -ge $max_unhealthy ]]; then
         log_warn "Agent '$name' has been unhealthy for $recent_failures checks. Attempting restart..."

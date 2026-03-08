@@ -46,6 +46,7 @@ require_cmd() {
 check_dependencies() {
   require_cmd docker "https://docs.docker.com/get-docker/"
   require_cmd jq "brew install jq (macOS) or apt-get install jq (Linux)"
+  require_cmd bc "brew install bc (macOS) or apt-get install bc (Linux)"
   if ! docker info &>/dev/null; then
     log_fatal "Docker daemon is not running. Start Docker Desktop or the Docker service."
   fi
@@ -57,18 +58,38 @@ acquire_lock() {
   LOCK_DIR="${FLEET_DIR}/agents/.fleet.lock"
   local retries=0
   while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    # Check for stale lock (PID-based detection)
+    local lock_pid_file="${LOCK_DIR}/pid"
+    if [[ -f "$lock_pid_file" ]]; then
+      local lock_pid
+      lock_pid=$(cat "$lock_pid_file" 2>/dev/null || echo "")
+      if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        log_warn "Removing stale lock (PID $lock_pid no longer running)"
+        rm -rf "$LOCK_DIR"
+        continue
+      fi
+    fi
     retries=$((retries + 1))
     if [[ $retries -ge 30 ]]; then
       log_fatal "Could not acquire fleet lock after 30 seconds. Another fleet.sh may be running. Remove ${LOCK_DIR} if stale."
     fi
     sleep 1
   done
-  # Clean up lock on exit
-  trap 'release_lock' EXIT INT TERM
+  # Write our PID for stale lock detection
+  echo $$ > "${LOCK_DIR}/pid" 2>/dev/null || true
+  # Clean up lock on exit (preserve existing traps)
+  local existing_trap
+  existing_trap=$(trap -p EXIT 2>/dev/null | sed "s/trap -- '\\(.*\\)' EXIT/\\1/" || true)
+  if [[ -n "$existing_trap" ]]; then
+    trap "release_lock; $existing_trap" EXIT INT TERM
+  else
+    trap 'release_lock' EXIT INT TERM
+  fi
 }
 
 release_lock() {
   if [[ -n "$LOCK_DIR" ]] && [[ -d "$LOCK_DIR" ]]; then
+    rm -f "${LOCK_DIR}/pid" 2>/dev/null || true
     rmdir "$LOCK_DIR" 2>/dev/null || true
   fi
 }
@@ -92,7 +113,7 @@ atomic_json_write() {
   fi
 
   # Atomic write (600 permissions enforced before mv)
-  echo "$content" > "$tmp"
+  printf '%s\n' "$content" > "$tmp"
   chmod 600 "$tmp"
   mv "$tmp" "$target"
 }
@@ -108,7 +129,7 @@ port_is_free() {
   if [[ "$PLATFORM" == "darwin" ]]; then
     ! lsof -i :"$port" &>/dev/null
   else
-    ! ss -tln 2>/dev/null | grep -q ":${port} "
+    ! ss -tln 2>/dev/null | grep -qE ":${port}([[:space:]]|$)"
   fi
 }
 
