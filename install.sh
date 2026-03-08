@@ -77,6 +77,12 @@ if ! command -v docker &>/dev/null; then
       info "Open Docker Desktop to finish setup, then re-run this installer."
       exit 0
     else
+      info "Docker Desktop can be downloaded from: https://docs.docker.com/desktop/install/mac-install/"
+      if can_prompt && ask "Open the download page in your browser?"; then
+        open "https://docs.docker.com/desktop/install/mac-install/" 2>/dev/null || true
+        info "Install Docker Desktop, then re-run this installer."
+        exit 0
+      fi
       MISSING+=("Docker — brew install --cask docker (macOS) or https://docs.docker.com/get-docker/")
     fi
   else
@@ -89,23 +95,34 @@ fi
 # jq
 if ! command -v jq &>/dev/null; then
   warn "jq not found."
+  installed_jq=false
   if [[ "$PLATFORM" == "Darwin" ]] && command -v brew &>/dev/null; then
     if can_prompt && ask "Install jq via Homebrew?"; then
-      brew install jq
-    else
-      MISSING+=("jq — brew install jq")
+      brew install jq && installed_jq=true
     fi
   elif command -v apt-get &>/dev/null; then
     if can_prompt && ask "Install jq via apt?"; then
-      sudo apt-get install -y jq
-    else
-      MISSING+=("jq — sudo apt-get install jq")
+      sudo apt-get install -y jq && installed_jq=true
     fi
-  else
-    MISSING+=("jq — https://jqlang.github.io/jq/download/")
   fi
-  if command -v jq &>/dev/null; then
-    ok "jq installed"
+  # Direct download fallback (no package manager needed)
+  if [[ "$installed_jq" == false ]]; then
+    info "Attempting direct jq download..."
+    local arch; arch=$(uname -m)
+    local jq_os="linux"
+    [[ "$PLATFORM" == "Darwin" ]] && jq_os="macos"
+    local jq_url="https://github.com/jqlang/jq/releases/latest/download/jq-${jq_os}-${arch}"
+    if curl -fsSL -o /usr/local/bin/jq "$jq_url" 2>/dev/null && chmod +x /usr/local/bin/jq 2>/dev/null; then
+      ok "jq installed to /usr/local/bin/jq"
+      installed_jq=true
+    elif curl -fsSL -o "${INSTALL_DIR}/jq" "$jq_url" 2>/dev/null && chmod +x "${INSTALL_DIR}/jq" 2>/dev/null; then
+      export PATH="${INSTALL_DIR}:$PATH"
+      ok "jq installed to ${INSTALL_DIR}/jq"
+      installed_jq=true
+    fi
+  fi
+  if [[ "$installed_jq" == false ]]; then
+    MISSING+=("jq — https://jqlang.github.io/jq/download/")
   fi
 else
   ok "jq found"
@@ -123,6 +140,29 @@ if ! command -v curl &>/dev/null; then
   MISSING+=("curl — needed for downloading files")
 else
   ok "curl found"
+fi
+
+# Node.js (required for OpenClaw CLI)
+if ! command -v node &>/dev/null; then
+  warn "Node.js not found."
+  installed_node=false
+  if [[ "$PLATFORM" == "Darwin" ]] && command -v brew &>/dev/null; then
+    if can_prompt && ask "Install Node.js via Homebrew?"; then
+      brew install node && installed_node=true
+    fi
+  elif command -v apt-get &>/dev/null; then
+    if can_prompt && ask "Install Node.js via apt?"; then
+      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - 2>/dev/null
+      sudo apt-get install -y nodejs && installed_node=true
+    fi
+  fi
+  if [[ "$installed_node" == false ]]; then
+    MISSING+=("Node.js — https://nodejs.org/en/download/")
+  else
+    ok "Node.js $(node --version) installed"
+  fi
+else
+  ok "Node.js $(node --version) found"
 fi
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
@@ -210,12 +250,26 @@ fi
 
 chmod +x "${INSTALL_DIR}/fleet.sh"
 
-# Syntax check
-if ! bash -n "${INSTALL_DIR}/fleet.sh" 2>/dev/null; then
-  warn "Syntax check failed on fleet.sh — the download may be corrupted. Try again."
-fi
-
 ok "Fleet manager installed to ${INSTALL_DIR}"
+
+# Verify installation integrity
+info "Verifying installation..."
+verify_failed=false
+for file in "${FILES[@]}"; do
+  if [[ ! -s "${INSTALL_DIR}/${file}" ]]; then
+    warn "Empty or missing: $file"
+    verify_failed=true
+  fi
+done
+if ! bash -n "${INSTALL_DIR}/fleet.sh" 2>/dev/null; then
+  warn "Syntax check failed on fleet.sh"
+  verify_failed=true
+fi
+if [[ "$verify_failed" == true ]]; then
+  warn "Some verification checks failed. The installation may be incomplete."
+else
+  ok "All files verified"
+fi
 
 # --- Post-install ---
 
