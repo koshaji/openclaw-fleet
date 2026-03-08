@@ -34,6 +34,8 @@ source "${FLEET_DIR}/lib/docker.sh"
 source "${FLEET_DIR}/lib/health.sh"
 source "${FLEET_DIR}/lib/models.sh"
 source "${FLEET_DIR}/lib/naming.sh"
+source "${FLEET_DIR}/lib/secrets.sh"
+source "${FLEET_DIR}/lib/agentguard.sh"
 
 # --- Fleet env initialization ---
 
@@ -87,6 +89,11 @@ EOF
   chmod 600 "$fleet_env"
   source "$fleet_env"
   log_ok "Fleet config saved to .env.fleet"
+
+  # Detect 1Password
+  if command -v op &>/dev/null; then
+    log_info "1Password CLI detected. You can secure API keys with: ./fleet.sh secrets migrate"
+  fi
   echo ""
 }
 
@@ -278,6 +285,11 @@ cmd_create() {
       registry_set_state "$name" "running"
       created=$((created + 1))
       created_names+=("$name")
+    fi
+
+    # Register with AgentGuard if enabled
+    if agentguard_enabled; then
+      register_agent "$name"
     fi
 
     # Stagger next creation to avoid thundering herd
@@ -580,6 +592,9 @@ cmd_destroy() {
 
   for name in "${agents_to_destroy[@]}"; do
     log_info "Destroying agent '$name'..."
+
+    # Deregister from AgentGuard
+    deregister_agent "$name"
 
     # Stop and remove containers
     destroy_agent_containers "$name"
@@ -984,6 +999,118 @@ cmd_models() {
   esac
 }
 
+cmd_secrets() {
+  local action="${1:-status}"
+  shift || true
+
+  case "$action" in
+    migrate)
+      migrate_to_op
+      ;;
+    status)
+      if op_available; then
+        log_ok "1Password CLI: connected"
+        local vault="OpenClaw-Fleet"
+        if op vault get "$vault" &>/dev/null 2>&1; then
+          local count
+          count=$(op item list --vault "$vault" --format json 2>/dev/null | jq length)
+          log_ok "Vault '$vault': $count item(s)"
+        else
+          log_info "Vault '$vault': not created yet. Run: ./fleet.sh secrets migrate"
+        fi
+      else
+        log_info "1Password CLI: not available (secrets stored in plaintext)"
+        log_info "To enable: brew install 1password-cli && op signin"
+      fi
+      ;;
+    *)
+      log_fatal "Usage: fleet.sh secrets [status|migrate]"
+      ;;
+  esac
+}
+
+cmd_agentguard() {
+  local action="${1:-status}"
+  shift || true
+
+  case "$action" in
+    enable)
+      local api_key="${1:-}"
+      if [[ -z "$api_key" ]]; then
+        echo -en "${CYAN}Enter AgentGuard API key (ag_live_...): ${NC}"
+        read -rs api_key
+        echo ""
+      fi
+      if [[ -z "$api_key" ]]; then
+        log_fatal "API key required. Get one at https://agentguard.tech"
+      fi
+      export AGENTGUARD_API_KEY="$api_key"
+
+      # Save to .env.fleet
+      if grep -q "AGENTGUARD_API_KEY" "${FLEET_DIR}/.env.fleet" 2>/dev/null; then
+        sed -i.bak "s|^AGENTGUARD_API_KEY=.*|AGENTGUARD_API_KEY='${api_key}'|" "${FLEET_DIR}/.env.fleet"
+        rm -f "${FLEET_DIR}/.env.fleet.bak"
+      else
+        echo "AGENTGUARD_API_KEY='${api_key}'" >> "${FLEET_DIR}/.env.fleet"
+      fi
+
+      init_agentguard
+      log_ok "AgentGuard enabled for this fleet"
+
+      # Register existing agents
+      init_registry
+      while IFS= read -r name; do
+        register_agent "$name"
+      done < <(registry_list_agents)
+      ;;
+
+    disable)
+      sed -i.bak '/^AGENTGUARD_/d' "${FLEET_DIR}/.env.fleet" 2>/dev/null
+      rm -f "${FLEET_DIR}/.env.fleet.bak"
+      log_ok "AgentGuard disabled"
+      ;;
+
+    status)
+      if agentguard_enabled; then
+        log_ok "AgentGuard: enabled"
+        init_registry
+        echo ""
+        printf "  ${BOLD}%-12s %-20s${NC}\n" "AGENT" "SECURITY STATUS"
+        printf "  %-12s %-20s\n" "------------" "--------------------"
+        while IFS= read -r name; do
+          local sec_status
+          sec_status=$(agent_security_status "$name")
+          printf "  %-12s %-20s\n" "$name" "$sec_status"
+        done < <(registry_list_agents)
+      else
+        log_info "AgentGuard: not configured"
+        log_info "Enable with: ./fleet.sh agentguard enable"
+      fi
+      ;;
+
+    kill)
+      local agent="${1:-}"
+      local reason="${2:-Manual kill via fleet CLI}"
+      if [[ -z "$agent" ]]; then
+        log_fatal "Usage: fleet.sh agentguard kill <agent_name> [reason]"
+      fi
+      kill_agent "$agent" "$reason"
+      ;;
+
+    policy)
+      init_agentguard
+      log_info "Policy file: ${AGENTGUARD_CONFIG}"
+      if command -v "${EDITOR:-vi}" &>/dev/null; then
+        "${EDITOR:-vi}" "$AGENTGUARD_CONFIG"
+      fi
+      ;;
+
+    *)
+      log_fatal "Usage: fleet.sh agentguard [enable|disable|status|kill|policy]"
+      ;;
+  esac
+}
+
 cmd_help() {
   local manager
   manager=$(get_fleet_manager_name)
@@ -1012,6 +1139,15 @@ Provider & Model Management:
 
   models assign       Assign primary + fallback models to an agent
   models list         Show current model allocations
+
+Security:
+  secrets status      Show 1Password integration status
+  secrets migrate     Migrate plaintext secrets to 1Password
+  agentguard enable   Enable AgentGuard policy enforcement
+  agentguard disable  Disable AgentGuard
+  agentguard status   Show security status for all agents
+  agentguard kill <n> Emergency kill switch for an agent
+  agentguard policy   Edit the security policy file
 
 Fleet Operations:
   update              Rolling update to latest OpenClaw image
@@ -1058,6 +1194,8 @@ main() {
     pair)         cmd_pair "$@" ;;
     providers)    source_fleet_env; cmd_providers "$@" ;;
     models)       source_fleet_env; cmd_models "$@" ;;
+    secrets)      cmd_secrets "$@" ;;
+    agentguard)   source_fleet_env; cmd_agentguard "$@" ;;
     help|--help|-h) cmd_help ;;
     *)            log_error "Unknown command: $command"; cmd_help; exit 1 ;;
   esac

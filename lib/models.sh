@@ -362,7 +362,10 @@ generate_agent_auth_profiles() {
   local profiles="{}"
   for sub in "${all_subs[@]}"; do
     local api_key
-    api_key=$(jq -r ".subscriptions[\"$sub\"].apiKey" "$PROVIDERS_FILE")
+    local raw_key
+    raw_key=$(jq -r ".subscriptions[\"$sub\"].apiKey" "$PROVIDERS_FILE")
+    # Resolve op:// references if 1Password is configured
+    api_key=$(resolve_secret "$raw_key") || api_key="$raw_key"
     local sub_type
     sub_type=$(jq -r ".subscriptions[\"$sub\"].type" "$PROVIDERS_FILE")
 

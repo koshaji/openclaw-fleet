@@ -333,7 +333,9 @@ create_agent_files_v2() {
     fi
     generate_openclaw_config "$gateway_port" "$gateway_token" "$telegram_token" \
       > "${agent_dir}/config/openclaw.json"
-    generate_auth_profiles "$api_key" \
+    local resolved_key
+    resolved_key=$(resolve_secret "$api_key") || return 1
+    generate_auth_profiles "$resolved_key" \
       > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
   fi
 
@@ -418,7 +420,9 @@ propagate_config() {
       log_error "No providers configured and ZAI_API_KEY not set"
       return 1
     fi
-    generate_auth_profiles "$api_key" \
+    local resolved_key
+    resolved_key=$(resolve_secret "$api_key") || return 1
+    generate_auth_profiles "$resolved_key" \
       > "${agent_dir}/config/agents/main/agent/auth-profiles.json"
   fi
 
