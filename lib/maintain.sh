@@ -321,11 +321,11 @@ maintain_run() {
 # Cron management
 maintain_install_cron() {
   local cron_cmd="0 4 * * * ${FLEET_DIR}/fleet.sh maintain run >> ${FLEET_DIR}/agents/maintain-cron.log 2>&1"
-  (crontab -l 2>/dev/null | grep -v "fleet.sh maintain"; echo "$cron_cmd") | crontab -
+  ( { crontab -l 2>/dev/null | grep -v "fleet.sh maintain" || true; } ; echo "$cron_cmd" ) | crontab -
   log_ok "Daily maintenance cron installed (runs at 04:00)"
 }
 
 maintain_uninstall_cron() {
-  (crontab -l 2>/dev/null | grep -v "fleet.sh maintain") | crontab -
+  ( crontab -l 2>/dev/null | grep -v "fleet.sh maintain" || true ) | crontab -
   log_ok "Daily maintenance cron removed"
 }

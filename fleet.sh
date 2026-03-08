@@ -40,6 +40,7 @@ source "${FLEET_DIR}/lib/naming.sh"
 source "${FLEET_DIR}/lib/secrets.sh"
 source "${FLEET_DIR}/lib/agentguard.sh"
 source "${FLEET_DIR}/lib/maintain.sh"
+source "${FLEET_DIR}/lib/doctor.sh"
 
 # --- Fleet env initialization ---
 
@@ -1024,11 +1025,11 @@ cmd_watchdog() {
   case "$action" in
     install)
       local cron_cmd="*/5 * * * * ${FLEET_DIR}/fleet.sh watchdog run >> ${FLEET_DIR}/agents/watchdog-cron.log 2>&1"
-      (crontab -l 2>/dev/null | grep -v "fleet.sh watchdog"; echo "$cron_cmd") | crontab -
+      ( { crontab -l 2>/dev/null | grep -v "fleet.sh watchdog" || true; } ; echo "$cron_cmd" ) | crontab -
       log_ok "Watchdog cron job installed (every 5 minutes)"
       ;;
     uninstall)
-      (crontab -l 2>/dev/null | grep -v "fleet.sh watchdog") | crontab -
+      ( crontab -l 2>/dev/null | grep -v "fleet.sh watchdog" || true ) | crontab -
       log_ok "Watchdog cron job removed"
       ;;
     run)
@@ -1693,6 +1694,23 @@ ENVEOF
   echo ""
 }
 
+cmd_doctor() {
+  local heal=true
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-fix|--dry-run) heal=false; shift ;;
+      *)                  log_fatal "Unknown option: $1" ;;
+    esac
+  done
+
+  detect_platform
+  source_fleet_env
+  init_registry
+
+  doctor_run "$heal"
+}
+
 cmd_help() {
   local manager
   manager=$(get_fleet_manager_name)
@@ -1741,6 +1759,7 @@ Fleet Operations:
   reconfigure         Re-propagate fleet config to all agents
 
 Tools:
+  doctor              Diagnose and auto-heal the entire fleet (--no-fix for dry run)
   capacity            Show max agents this machine can run
   logs <name>         View agent logs (--tail N, --follow)
   shell <name>        Open shell in agent container
@@ -1786,6 +1805,7 @@ main() {
     secrets)      cmd_secrets "$@" ;;
     agentguard)   source_fleet_env; cmd_agentguard "$@" ;;
     setup)        cmd_setup ;;
+    doctor)       cmd_doctor "$@" ;;
     help|--help|-h) cmd_help ;;
     *)            log_error "Unknown command: $command"; cmd_help; exit 1 ;;
   esac
