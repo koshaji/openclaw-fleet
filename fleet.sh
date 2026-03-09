@@ -235,14 +235,12 @@ cmd_create() {
     fi
 
     if [[ -z "$tg_token" ]]; then
-      log_error "Telegram token required for '$name'. Skipping."
-      failed=$((failed + 1))
-      failed_names+=("$name")
-      continue
+      log_warn "No Telegram token for '$name'. Agent will run without Telegram."
+      tg_token=""
     fi
 
-    # Validate token format (digits:alphanumeric)
-    if ! echo "$tg_token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$'; then
+    # Validate token format (digits:alphanumeric) — skip validation if empty
+    if [[ -n "$tg_token" ]] && ! echo "$tg_token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$'; then
       log_error "Invalid Telegram token format for '$name'. Expected format: 123456:ABC-xyz. Skipping."
       failed=$((failed + 1))
       failed_names+=("$name")

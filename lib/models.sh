@@ -8,9 +8,9 @@ PROVIDERS_FILE="${FLEET_DIR}/agents/providers.json"
 
 get_provider_api() {
   case "$1" in
-    anthropic)  echo "anthropic" ;;
+    anthropic)  echo "anthropic-messages" ;;
     openai)     echo "openai-completions" ;;
-    google)     echo "google-ai" ;;
+    google)     echo "google-generative-ai" ;;
     zai)        echo "openai-completions" ;;
     ollama)     echo "openai-completions" ;;
     openrouter) echo "openai-completions" ;;
@@ -20,6 +20,9 @@ get_provider_api() {
 
 get_provider_url() {
   case "$1" in
+    anthropic)  echo "https://api.anthropic.com" ;;
+    openai)     echo "https://api.openai.com/v1" ;;
+    google)     echo "https://generativelanguage.googleapis.com" ;;
     zai)        echo "https://api.z.ai/api/coding/paas/v4" ;;
     ollama)     echo "http://localhost:11434/v1" ;;
     openrouter) echo "https://openrouter.ai/api/v1" ;;

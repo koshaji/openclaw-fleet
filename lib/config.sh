@@ -63,7 +63,7 @@ generate_openclaw_config() {
           maxConcurrent: 4
         }
       },
-      channels: {
+      channels: (if $tg_token == "" then {} else {
         telegram: {
           enabled: true,
           dmPolicy: "pairing",
@@ -71,7 +71,7 @@ generate_openclaw_config() {
           groupPolicy: "allowlist",
           streaming: "partial"
         }
-      },
+      } end),
       browser: {
         headless: true,
         noSandbox: true
@@ -241,7 +241,7 @@ create_agent_files() {
   local agent_dir="${FLEET_DIR}/agents/${name}"
 
   # Create directory structure
-  mkdir -p "${agent_dir}"/{config/{identity,agents/main/agent,agents/main/sessions},workspace}
+  mkdir -p "${agent_dir}"/{config/{identity,agents/main/agent,agents/main/sessions,workspace},workspace}
 
   # Generate all config files using jq
   generate_openclaw_config "$gateway_port" "$gateway_token" "$telegram_token" \
@@ -273,7 +273,7 @@ create_agent_files_v2() {
   local agent_dir="${FLEET_DIR}/agents/${name}"
 
   # Create directory structure
-  mkdir -p "${agent_dir}"/{config/{identity,agents/main/agent,agents/main/sessions},workspace}
+  mkdir -p "${agent_dir}"/{config/{identity,agents/main/agent,agents/main/sessions,workspace},workspace}
 
   # Check if providers.json exists and has subscriptions
   local providers_file="${FLEET_DIR}/agents/providers.json"
@@ -320,7 +320,7 @@ create_agent_files_v2() {
             maxConcurrent: 4
           }
         },
-        channels: {
+        channels: (if $tg_token == "" then {} else {
           telegram: {
             enabled: true,
             dmPolicy: "pairing",
@@ -328,7 +328,7 @@ create_agent_files_v2() {
             groupPolicy: "allowlist",
             streaming: "partial"
           }
-        },
+        } end),
         browser: {
           headless: true,
           noSandbox: true
